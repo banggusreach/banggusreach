@@ -6,7 +6,6 @@ const { initializeApp } = require('firebase/app');
 const { getDatabase, ref, get, set, update, remove, child } = require('firebase/database');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -148,7 +147,6 @@ async function registerXof(username, password, clientId){
   return res.json();
 }
 
-// Mengganti exec(curl) dengan fetch native agar aman di Cloud/Vercel/Railway
 async function handshake(taunting = 9) {
   let resData;
   try {
@@ -299,7 +297,7 @@ app.get('/admin', checkAuth, async (req, res) => {
     res.send(renderDashboardAdmin(req.user, allUsers, redeemCodes, serverStatus));
 });
 
-// --- API ENDPOINT REACT ---
+// --- API ENDPOINT REACT (DENGAN PERBAIKAN TIMEOUT VERCEL) ---
 app.post('/api/react', checkAuth, async (req, res) => {
     const serverStatus = await getServerStatus();
     if (serverStatus === 'offline' && req.user.role !== 'admin') {
@@ -314,14 +312,16 @@ app.post('/api/react', checkAuth, async (req, res) => {
     }
 
     try {
+        // PERBAIKAN: Menunggu eksekusi send() selesai 100% sebelum mengirimkan response JSON
         const result = await send(link, emoji);
+        
         if (req.user.role !== 'admin') {
             req.user.coins -= 1;
             await saveUser(req.user);
         }
         res.json({ success: true, remainingCoins: req.user.coins, result });
     } catch (e) {
-        res.json({ success: false, error: e.message });
+        res.status(500).json({ success: false, error: e.message });
     }
 });
 
@@ -418,9 +418,7 @@ app.post('/api/admin/toggle-server', checkAuth, async (req, res) => {
     res.json({ success: true, serverStatus: newStatus, message: `Status server berhasil diubah menjadi ${newStatus}` });
 });
 
-// ==========================================
-// TEMPLATE HALAMAN HTML (Sama Seperti Sebelumnya)
-// ==========================================
+// --- TEMPLATE HALAMAN HTML ---
 function renderAuthPage(type) {
     const isLogin = type === 'login';
     return `
@@ -931,8 +929,5 @@ function renderDashboardAdmin(user, allUsers, allCodes, currentServerStatus) {
     `;
 }
 
-// HAPUS ATAU KOMENTARI BARIS INI:
-// app.listen(PORT, () => { ... });
-
-// GANTI MENJADI:
+// WAJIB UNTUK VERCEL SERVERLESS
 module.exports = app;
