@@ -119,7 +119,6 @@ const generateFakeIP = () => `${Math.floor(Math.random() * 223) + 1}.${Math.floo
 const fpHash = Math.abs(Math.floor(Math.random() * 1000000)).toString(16);
 const fakeIP = generateFakeIP();
 const fb = () => ({ headers: { 'X-Device-Fingerprint': `fp_${fpHash}`, 'X-Forwarded-For': fakeIP, 'X-Real-IP': fakeIP, 'True-Client-IP': fakeIP } }); 
-let T;
 
 const config = {
     base: "https://reach-wa-nexus.vercel.app",
@@ -147,46 +146,55 @@ async function registerXof(username, password, clientId){
   return res.json();
 }
 
+// --- PERBAIKAN FUNGSI HANDSHAKE (PER-REQUEST LOOP RETRY) ---
 async function handshake(taunting = 9) {
-  let resData;
-  try {
-      const response = await fetch('https://anzzmodsofficial.edgeone.dev/api/v1/handshake', {
-          method: 'POST',
-          headers: {
-              'Accept': '*/*',
-              'Accept-Language': 'id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7',
-              'Cache-Control': 'no-cache',
-              'Connection': 'keep-alive',
-              'Content-Length': '0',
-              'Origin': 'https://reach-wa-nexus.vercel.app',
-              'Pragma': 'no-cache',
-              'Referer': 'https://reach-wa-nexus.vercel.app/',
-              'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36',
-              'X-API-Key': 'anzz_live_18fc288f3fbc64643542c40197a5713f0aef51e354a6c254',
-              'sec-ch-ua': '"Chromium";v="137", "Not/A)Brand";v="24"',
-              'sec-ch-ua-mobile': '?1',
-              'sec-ch-ua-platform': '"Android"'
-          }
-      });
-      resData = await response.json();
-  } catch (e) {
-      throw new Error('Gagal melakukan handshake: ' + e.message);
-  }
+  let attempt = 0;
+  while (attempt < Number(taunting)) {
+      try {
+          const response = await fetch('https://anzzmodsofficial.edgeone.dev/api/v1/handshake', {
+              method: 'POST',
+              headers: {
+                  'Accept': '*/*',
+                  'Accept-Language': 'id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7',
+                  'Cache-Control': 'no-cache',
+                  'Connection': 'keep-alive',
+                  'Content-Length': '0',
+                  'Origin': 'https://reach-wa-nexus.vercel.app',
+                  'Pragma': 'no-cache',
+                  'Referer': 'https://reach-wa-nexus.vercel.app/',
+                  'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36',
+                  'X-API-Key': config.apikey,
+                  'sec-ch-ua': '"Chromium";v="137", "Not/A)Brand";v="24"',
+                  'sec-ch-ua-mobile': '?1',
+                  'sec-ch-ua-platform': '"Android"'
+              }
+          });
+          const resData = await response.json();
 
-  if (resData.ok && resData.token) return resData.token;
-  if(typeof resData.error === 'string' && resData.error.includes('key_')) {
-    let attempt = 0;
-    while(resData.error.includes('key_') && attempt < Number(taunting)) {
-        attempt++;
-        await new Promise(r => setTimeout(r, 1000));
-     }
+          if (resData.ok && resData.token) {
+              return resData.token;
+          }
+
+          if (typeof resData.error === 'string' && resData.error.includes('key_')) {
+              attempt++;
+              await new Promise(r => setTimeout(r, 1500));
+              continue;
+          }
+      } catch (e) {
+          attempt++;
+          await new Promise(r => setTimeout(r, 1000));
+      }
   }
-  return 0;
+  throw new Error('Gagal mendapatkan token Handshake (API Key sibuk atau terlimit)');
 }
 
+// --- PERBAIKAN FUNGSI SEND (ISOLASI TOKEN LOKAL & VALIDASI UPSTREAM) ---
 async function send(url, reactions){
-  const t = await handshake();
-  if (typeof t === 'string') { T = t; }
+  const handshakeToken = await handshake();
+  if (!handshakeToken) {
+      throw new Error('Token Handshake tidak valid.');
+  }
+
   reactions = parseEmoji(reactions);
   const isValid = /^https:\/\/(?:www\.)?whatsapp\.com\/channel\/[A-Za-z0-9]+\/\d+$/.test(url);
   if(!isValid) throw new Error('invalid url (Pastikan format link channel WhatsApp benar)');
@@ -206,7 +214,7 @@ async function send(url, reactions){
               'Referer': 'https://reach-wa-nexus.vercel.app/',
               'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36',
               'X-API-Key': config.apikey,
-              'X-Handshake-Token': T,
+              'X-Handshake-Token': handshakeToken,
               'sec-ch-ua': '"Chromium";v="137", "Not/A)Brand";v="24"',
               'sec-ch-ua-mobile': '?1',
               'sec-ch-ua-platform': '"Android"'
@@ -217,6 +225,11 @@ async function send(url, reactions){
   } catch (e) {
       throw new Error('Gagal mengirim reaksi: ' + e.message);
   }
+
+  if (resData && resData.ok === false) {
+      throw new Error(resData.message || resData.error || 'API Upstream menolak permintaan reaksi');
+  }
+
   return resData;
 }
 
@@ -297,7 +310,7 @@ app.get('/admin', checkAuth, async (req, res) => {
     res.send(renderDashboardAdmin(req.user, allUsers, redeemCodes, serverStatus));
 });
 
-// --- API ENDPOINT REACT (DENGAN PERBAIKAN TIMEOUT VERCEL) ---
+// --- API ENDPOINT REACT ---
 app.post('/api/react', checkAuth, async (req, res) => {
     const serverStatus = await getServerStatus();
     if (serverStatus === 'offline' && req.user.role !== 'admin') {
@@ -312,7 +325,6 @@ app.post('/api/react', checkAuth, async (req, res) => {
     }
 
     try {
-        // PERBAIKAN: Menunggu eksekusi send() selesai 100% sebelum mengirimkan response JSON
         const result = await send(link, emoji);
         
         if (req.user.role !== 'admin') {
@@ -628,7 +640,7 @@ function renderDashboardUser(user) {
                 const outContainer = document.getElementById('resultContainer');
                 
                 btn.disabled = true; btn.textContent = 'Memproses...';
-                outContainer.classList.remove('hidden');
+                outContainer.classList.add('hidden');
                 try {
                     const res = await fetch('/api/react', {
                         method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -636,17 +648,16 @@ function renderDashboardUser(user) {
                     });
                     const data = await res.json();
                     if(data.success) {
+                        outContainer.classList.remove('hidden');
                         document.getElementById('coinDisplay').textContent = data.remainingCoins + ' Koin';
                     } else {
                         alert(data.error);
-                        outContainer.classList.add('hidden');
                         if(data.error && data.error.includes('offline')) {
                             window.location.reload();
                         }
                     }
                 } catch(err) {
                     alert('Gagal: ' + err.message);
-                    outContainer.classList.add('hidden');
                 } finally {
                     btn.disabled = false; btn.textContent = 'Kirim Reaksi (1 Koin)';
                 }
@@ -903,7 +914,7 @@ function renderDashboardAdmin(user, allUsers, allCodes, currentServerStatus) {
                 const outContainer = document.getElementById('adminResultContainer');
                 
                 btn.disabled = true; btn.textContent = 'Memproses...';
-                outContainer.classList.remove('hidden');
+                outContainer.classList.add('hidden');
                 try {
                     const res = await fetch('/api/react', {
                         method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -911,14 +922,13 @@ function renderDashboardAdmin(user, allUsers, allCodes, currentServerStatus) {
                     });
                     const data = await res.json();
                     if(data.success) {
+                        outContainer.classList.remove('hidden');
                         document.getElementById('adminCoinDisplay').textContent = data.remainingCoins + ' Koin (Admin)';
                     } else {
                         alert(data.error);
-                        outContainer.classList.add('hidden');
                     }
                 } catch(err) {
                     alert('Gagal: ' + err.message);
-                    outContainer.classList.add('hidden');
                 } finally {
                     btn.disabled = false; btn.textContent = 'Kirim Reaksi (Bebas Biaya)';
                 }
