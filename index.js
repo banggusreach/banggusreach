@@ -1,124 +1,47 @@
 const express = require('express');
 const crypto = require('crypto');
+const { exec } = require('node:child_process');
 const Go = require('@xof/fetch');
 const cookieParser = require('cookie-parser');
-const { initializeApp } = require('firebase/app');
-const { getDatabase, ref, get, set, update, remove, child } = require('firebase/database');
 
 const app = express();
+const PORT = process.env.PORT || 3000;
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 
-// --- INISIALISASI FIREBASE ---
-const firebaseConfig = {
-    apiKey: "AIzaSyCg1K6T7IZ4ldhX6ehn9uC_KfRrFSSv9ec",
-    authDomain: "jualakunbs.firebaseapp.com",
-    databaseURL: "https://jualakunbs-default-rtdb.firebaseio.com",
-    projectId: "jualakunbs",
-    storageBucket: "jualakunbs.firebasestorage.app",
-    messagingSenderId: "341323679179",
-    appId: "1:341323679179:web:0167d4d9e3661c553d624e"
-};
-
-const firebaseApp = initializeApp(firebaseConfig);
-const db = getDatabase(firebaseApp);
+// --- DATABASE MEMORI ---
+const users = [
+    { username: 'adminbagus', password: 'baguss', role: 'admin', coins: 99999, clientId: 'nx_admin00000000000000', redeemedCodes: [], lastCoinReset: Date.now() }
+];
+const redeemCodes = []; // Menyimpan daftar kode redeem aktif { code, minCoins, maxCoins, quota }
 const sessions = new Map();
 
-// --- INISIALISASI DATA AWAL DI FIREBASE ---
-async function initializeDatabase() {
-    try {
-        const dbRef = ref(db);
-        
-        // Cek apakah admin sudah ada
-        const adminSnap = await get(child(dbRef, 'users/adminbagus'));
-        if (!adminSnap.exists()) {
-            await set(ref(db, 'users/adminbagus'), {
-                username: 'adminbagus',
-                password: 'baguss',
-                role: 'admin',
-                coins: 99999,
-                clientId: 'nx_admin00000000000000',
-                redeemedCodes: [],
-                lastCoinReset: Date.now()
-            });
-        }
-
-        // Cek status server
-        const statusSnap = await get(child(dbRef, 'system/serverStatus'));
-        if (!statusSnap.exists()) {
-            await set(ref(db, 'system/serverStatus'), 'online');
-        }
-    } catch (e) {
-        console.error('Gagal menginisialisasi database Firebase:', e.message);
-    }
-}
-initializeDatabase();
-
-// --- FUNGSI HELPER DATABASE ---
-async function getUsers() {
-    const snapshot = await get(ref(db, 'users'));
-    if (!snapshot.exists()) return [];
-    return Object.values(snapshot.val());
-}
-
-async function getUserByUsername(username) {
-    const snapshot = await get(ref(db, `users/${username}`));
-    if (!snapshot.exists()) return null;
-    return snapshot.val();
-}
-
-async function saveUser(user) {
-    await set(ref(db, `users/${user.username}`), user);
-}
-
-async function getRedeemCodes() {
-    const snapshot = await get(ref(db, 'redeemCodes'));
-    if (!snapshot.exists()) return [];
-    return Object.values(snapshot.val());
-}
-
-async function saveRedeemCode(codeObj) {
-    await set(ref(db, `redeemCodes/${codeObj.code}`), codeObj);
-}
-
-async function deleteRedeemCode(code) {
-    await remove(ref(db, `redeemCodes/${code}`));
-}
-
-async function getServerStatus() {
-    const snapshot = await get(ref(db, 'system/serverStatus'));
-    return snapshot.exists() ? snapshot.val() : 'online';
-}
-
-async function setServerStatus(status) {
-    await set(ref(db, 'system/serverStatus'), status);
-}
-
 // --- FUNGSI HELPER RESET KOIN 24 JAM ---
-async function checkAndResetCoins(user) {
+function checkAndResetCoins(user) {
     if (user.role === 'admin') return;
     const now = Date.now();
     const twentyFourHours = 24 * 60 * 60 * 1000;
     if (!user.lastCoinReset) {
         user.lastCoinReset = now;
-        await saveUser(user);
     } else if (now - user.lastCoinReset >= twentyFourHours) {
         if (user.coins <= 0) {
             user.coins = 3; // Reset koin kembali ke 3 jika habis setelah 24 jam
         }
         user.lastCoinReset = now;
-        await saveUser(user);
     }
 }
 
 // --- LOGIKA UTAMA DARI KODE ANDA ---
+const Random = () => Math.floor(Math.random() * 10000000);
 const Uid = () => 'nx_' + crypto.randomUUID().replace(/-/g,'').slice(0,21);
+const Password = () => crypto.randomBytes(7).toString('base64') + 'XOF-A1!';
 const generateFakeIP = () => `${Math.floor(Math.random() * 223) + 1}.${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}`;
 const fpHash = Math.abs(Math.floor(Math.random() * 1000000)).toString(16);
 const fakeIP = generateFakeIP();
 const fb = () => ({ headers: { 'X-Device-Fingerprint': `fp_${fpHash}`, 'X-Forwarded-For': fakeIP, 'X-Real-IP': fakeIP, 'True-Client-IP': fakeIP } }); 
+let T;
 
 const config = {
     base: "https://reach-wa-nexus.vercel.app",
@@ -146,101 +69,48 @@ async function registerXof(username, password, clientId){
   return res.json();
 }
 
-// --- PERBAIKAN FUNGSI HANDSHAKE (PER-REQUEST LOOP RETRY) ---
 async function handshake(taunting = 9) {
-  let attempt = 0;
-  while (attempt < Number(taunting)) {
-      try {
-          const response = await fetch('https://anzzmodsofficial.edgeone.dev/api/v1/handshake', {
-              method: 'POST',
-              headers: {
-                  'Accept': '*/*',
-                  'Accept-Language': 'id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7',
-                  'Cache-Control': 'no-cache',
-                  'Connection': 'keep-alive',
-                  'Content-Length': '0',
-                  'Origin': 'https://reach-wa-nexus.vercel.app',
-                  'Pragma': 'no-cache',
-                  'Referer': 'https://reach-wa-nexus.vercel.app/',
-                  'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36',
-                  'X-API-Key': config.apikey,
-                  'sec-ch-ua': '"Chromium";v="137", "Not/A)Brand";v="24"',
-                  'sec-ch-ua-mobile': '?1',
-                  'sec-ch-ua-platform': '"Android"'
-              }
-          });
-          const resData = await response.json();
-
-          if (resData.ok && resData.token) {
-              return resData.token;
-          }
-
-          if (typeof resData.error === 'string' && resData.error.includes('key_')) {
-              attempt++;
-              await new Promise(r => setTimeout(r, 1500));
-              continue;
-          }
-      } catch (e) {
-          attempt++;
-          await new Promise(r => setTimeout(r, 1000));
-      }
+  const res = await new Promise((resolve, reject) => {
+  exec(`curl 'https://anzzmodsofficial.edgeone.dev/api/v1/handshake' -X POST -H 'Accept: */*' -H 'Accept-Language: id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7' -H 'Cache-Control: no-cache' -H 'Connection: keep-alive' -H 'Content-Length: 0' -H 'Origin: https://reach-wa-nexus.vercel.app' -H 'Pragma: no-cache' -H 'Referer: https://reach-wa-nexus.vercel.app/' -H 'Sec-Fetch-Dest: empty' -H 'Sec-Fetch-Mode: cors' -H 'Sec-Fetch-Site: cross-site' -H 'User-Agent: Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36' -H 'X-API-Key: anzz_live_18fc288f3fbc64643542c40197a5713f0aef51e354a6c254' -H 'sec-ch-ua: "Chromium";v="137", "Not/A)Brand";v="24"' -H 'sec-ch-ua-mobile: ?1' -H 'sec-ch-ua-platform: "Android"' --compressed`, (err, stdout) => {
+    if (err) reject(err);
+    try { resolve(JSON.parse(stdout)); } catch (e) { reject(e); }
+  });
+});
+  if (res.ok && res.token) return res.token;
+  if(typeof res.error === 'string' && res.error.includes('key_')) {
+    let attempt = 0;
+    while(res.error.includes('key_') && attempt < Number(taunting)) {
+        attempt++;
+        await new Promise(r => setTimeout(r, 1000));
+     }
   }
-  throw new Error('Gagal mendapatkan token Handshake (API Key sibuk atau terlimit)');
+  return 0;
 }
 
-// --- PERBAIKAN FUNGSI SEND (ISOLASI TOKEN LOKAL & VALIDASI UPSTREAM) ---
 async function send(url, reactions){
-  const handshakeToken = await handshake();
-  if (!handshakeToken) {
-      throw new Error('Token Handshake tidak valid.');
-  }
-
+  const t = await handshake();
+  if (typeof t === 'string') { T = t; }
   reactions = parseEmoji(reactions);
   const isValid = /^https:\/\/(?:www\.)?whatsapp\.com\/channel\/[A-Za-z0-9]+\/\d+$/.test(url);
   if(!isValid) throw new Error('invalid url (Pastikan format link channel WhatsApp benar)');
   
-  let resData;
-  try {
-      const response = await fetch(`${config.api}/api/v1/react`, {
-          method: 'POST',
-          headers: {
-              'Accept': '*/*',
-              'Accept-Language': 'id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7',
-              'Cache-Control': 'no-cache',
-              'Connection': 'keep-alive',
-              'Content-Type': 'application/json',
-              'Origin': 'https://reach-wa-nexus.vercel.app',
-              'Pragma': 'no-cache',
-              'Referer': 'https://reach-wa-nexus.vercel.app/',
-              'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36',
-              'X-API-Key': config.apikey,
-              'X-Handshake-Token': handshakeToken,
-              'sec-ch-ua': '"Chromium";v="137", "Not/A)Brand";v="24"',
-              'sec-ch-ua-mobile': '?1',
-              'sec-ch-ua-platform': '"Android"'
-          },
-          body: JSON.stringify({ url, reactions })
-      });
-      resData = await response.json();
-  } catch (e) {
-      throw new Error('Gagal mengirim reaksi: ' + e.message);
-  }
-
-  if (resData && resData.ok === false) {
-      throw new Error(resData.message || resData.error || 'API Upstream menolak permintaan reaksi');
-  }
-
-  return resData;
+  const res = await new Promise((resolve, reject) => { 
+   exec(`curl '${config.api}/api/v1/react' -X POST -H 'Accept: */*' \ -H 'Accept-Language: id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7' \ -H 'Cache-Control: no-cache' \ -H 'Connection: keep-alive' \ -H 'Content-Type: application/json' \ -H 'Origin: https://reach-wa-nexus.vercel.app' \ -H 'Pragma: no-cache' \ -H 'Referer: https://reach-wa-nexus.vercel.app/' \ -H 'Sec-Fetch-Dest: empty' \ -H 'Sec-Fetch-Mode: cors' \ -H 'Sec-Fetch-Site: cross-site' \ -H 'User-Agent: Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36' \ -H 'X-API-Key: ${config.apikey}' \ -H 'X-Handshake-Token: ${T}' \ -H 'sec-ch-ua: "Chromium";v="137", "Not/A)Brand";v="24"' \ -H 'sec-ch-ua-mobile: ?1' \ -H 'sec-ch-ua-platform: "Android"' \ --data-raw '${JSON.stringify({ url, reactions })}'\ --compressed`, (err, stdout) => {
+    if (err) reject(err);
+    try { resolve(JSON.parse(stdout)); } catch (e) { reject(e); }
+  });
+});
+  return res;
 }
 
 // --- MIDDLEWARE AUTENTIKASI ---
-async function checkAuth(req, res, next) {
+function checkAuth(req, res, next) {
     const token = req.cookies.session_token;
     if (token && sessions.has(token)) {
         const sessionUser = sessions.get(token);
-        const latestUser = await getUserByUsername(sessionUser.username);
+        const latestUser = users.find(u => u.username === sessionUser.username);
         if (latestUser) {
-            await checkAndResetCoins(latestUser);
+            checkAndResetCoins(latestUser); // Cek reset koin setiap request terautentikasi
             req.user = latestUser;
             next();
             return;
@@ -253,14 +123,12 @@ async function checkAuth(req, res, next) {
 app.get('/login', (req, res) => res.send(renderAuthPage('login')));
 app.get('/register', (req, res) => res.send(renderAuthPage('register')));
 
-app.post('/api/auth/login', async (req, res) => {
+app.post('/api/auth/login', (req, res) => {
     const { username, password } = req.body;
-    const user = await getUserByUsername(username);
-    if (!user || user.password !== password) {
-        return res.status(400).json({ success: false, error: 'Username atau password salah!' });
-    }
+    const user = users.find(u => u.username === username && u.password === password);
+    if (!user) return res.status(400).json({ success: false, error: 'Username atau password salah!' });
     
-    await checkAndResetCoins(user);
+    checkAndResetCoins(user);
     const sessionToken = crypto.randomBytes(32).toString('hex');
     sessions.set(sessionToken, user);
     res.cookie('session_token', sessionToken, { httpOnly: true });
@@ -270,15 +138,12 @@ app.post('/api/auth/login', async (req, res) => {
 app.post('/api/auth/register', async (req, res) => {
     const { username, password } = req.body;
     if (!username || !password) return res.status(400).json({ success: false, error: 'Semua kolom wajib diisi!' });
-    
-    const existingUser = await getUserByUsername(username);
-    if (existingUser) return res.status(400).json({ success: false, error: 'Username sudah digunakan!' });
+    if (users.find(u => u.username === username)) return res.status(400).json({ success: false, error: 'Username sudah digunakan!' });
     
     const clientId = Uid();
     try {
         await registerXof(username, password, clientId);
-        const newUser = { username, password, role: 'user', coins: 3, clientId, redeemedCodes: [], lastCoinReset: Date.now() };
-        await saveUser(newUser);
+        users.push({ username, password, role: 'user', coins: 3, clientId, redeemedCodes: [], lastCoinReset: Date.now() });
         res.json({ success: true, message: 'Registrasi berhasil! Anda mendapatkan 3 koin gratis.' });
     } catch (e) {
         res.status(500).json({ success: false, error: 'Gagal mendaftar ke server pusat: ' + e.message });
@@ -293,30 +158,18 @@ app.get('/logout', (req, res) => {
 });
 
 // --- ROUTE DASHBOARD ---
-app.get('/', checkAuth, async (req, res) => {
+app.get('/', checkAuth, (req, res) => {
     if (req.user.role === 'admin') return res.redirect('/admin');
-    const serverStatus = await getServerStatus();
-    if (serverStatus === 'offline') {
-        return res.send(renderServerOfflinePage());
-    }
     res.send(renderDashboardUser(req.user));
 });
 
-app.get('/admin', checkAuth, async (req, res) => {
+app.get('/admin', checkAuth, (req, res) => {
     if (req.user.role !== 'admin') return res.redirect('/');
-    const allUsers = await getUsers();
-    const redeemCodes = await getRedeemCodes();
-    const serverStatus = await getServerStatus();
-    res.send(renderDashboardAdmin(req.user, allUsers, redeemCodes, serverStatus));
+    res.send(renderDashboardAdmin(req.user, users, redeemCodes));
 });
 
 // --- API ENDPOINT REACT ---
 app.post('/api/react', checkAuth, async (req, res) => {
-    const serverStatus = await getServerStatus();
-    if (serverStatus === 'offline' && req.user.role !== 'admin') {
-        return res.status(403).json({ success: false, error: 'Server sedang offline oleh Admin. Anda tidak dapat mengirimkan reach saat ini.' });
-    }
-
     const { link, emoji } = req.body;
     if (!link || !emoji) return res.status(400).json({ success: false, error: 'Link & emoji wajib diisi!' });
     
@@ -326,30 +179,28 @@ app.post('/api/react', checkAuth, async (req, res) => {
 
     try {
         const result = await send(link, emoji);
-        
         if (req.user.role !== 'admin') {
             req.user.coins -= 1;
-            await saveUser(req.user);
         }
         res.json({ success: true, remainingCoins: req.user.coins, result });
     } catch (e) {
-        res.status(500).json({ success: false, error: e.message });
+        res.json({ success: false, error: e.message });
     }
 });
 
 // --- API ENDPOINT REDEEM KODE ---
-app.post('/api/redeem', checkAuth, async (req, res) => {
+app.post('/api/redeem', checkAuth, (req, res) => {
     const { code } = req.body;
     if (!code) return res.status(400).json({ success: false, error: 'Kode redeem wajib diisi!' });
 
-    const formattedCode = code.trim().toUpperCase();
-    const redeemCodes = await getRedeemCodes();
-    const targetCode = redeemCodes.find(c => c.code === formattedCode);
-    
-    if (!targetCode) return res.status(400).json({ success: false, error: 'Kode redeem tidak valid!' });
+    const targetCodeIndex = redeemCodes.findIndex(c => c.code === code.trim().toUpperCase());
+    if (targetCodeIndex === -1) return res.status(400).json({ success: false, error: 'Kode redeem tidak valid!' });
+
+    const targetCode = redeemCodes[targetCodeIndex];
 
     if (targetCode.quota <= 0) {
-        await deleteRedeemCode(targetCode.code);
+        // Fitur Hapus Kode Redeem Ketika Kuota Habis (Otomatis)
+        redeemCodes.splice(targetCodeIndex, 1);
         return res.status(400).json({ success: false, error: 'Kuota kode redeem ini sudah habis dan telah dihapus dari sistem!' });
     }
 
@@ -361,21 +212,19 @@ app.post('/api/redeem', checkAuth, async (req, res) => {
     const earnedCoins = Math.floor(Math.random() * (targetCode.maxCoins - targetCode.minCoins + 1)) + targetCode.minCoins;
     
     req.user.coins += earnedCoins;
-    req.user.redeemedCodes.push(targetCode.code);
-    await saveUser(req.user);
-
     targetCode.quota -= 1;
+    req.user.redeemedCodes.push(targetCode.code);
+
+    // Hapus otomatis jika kuota langsung habis setelah dipakai
     if (targetCode.quota <= 0) {
-        await deleteRedeemCode(targetCode.code);
-    } else {
-        await saveRedeemCode(targetCode);
+        redeemCodes.splice(targetCodeIndex, 1);
     }
 
     res.json({ success: true, earnedCoins, totalCoins: req.user.coins, message: `Berhasil menukar kode! Anda mendapatkan ${earnedCoins} koin.` });
 });
 
 // --- API ENDPOINT ADMIN: BUAT KODE REDEEM ---
-app.post('/api/admin/create-code', checkAuth, async (req, res) => {
+app.post('/api/admin/create-code', checkAuth, (req, res) => {
     if (req.user.role !== 'admin') return res.status(403).json({ success: false, error: 'Akses ditolak!' });
     
     const { code, minCoins, maxCoins, quota } = req.body;
@@ -384,7 +233,6 @@ app.post('/api/admin/create-code', checkAuth, async (req, res) => {
     }
 
     const formattedCode = code.trim().toUpperCase();
-    const redeemCodes = await getRedeemCodes();
     if (redeemCodes.some(c => c.code === formattedCode)) {
         return res.status(400).json({ success: false, error: 'Kode redeem sudah ada!' });
     }
@@ -397,40 +245,32 @@ app.post('/api/admin/create-code', checkAuth, async (req, res) => {
         return res.status(400).json({ success: false, error: 'Min Koin tidak boleh lebih besar dari Max Koin!' });
     }
 
-    const newCode = {
+    redeemCodes.push({
         code: formattedCode,
         minCoins: parsedMin,
         maxCoins: parsedMax,
         quota: parsedQuota
-    };
+    });
 
-    await saveRedeemCode(newCode);
     res.json({ success: true, message: 'Kode redeem berhasil dibuat!' });
 });
 
 // --- API ENDPOINT ADMIN: HAPUS KODE REDEEM MANUAL ---
-app.post('/api/admin/delete-code', checkAuth, async (req, res) => {
+app.post('/api/admin/delete-code', checkAuth, (req, res) => {
     if (req.user.role !== 'admin') return res.status(403).json({ success: false, error: 'Akses ditolak!' });
     const { code } = req.body;
-    const redeemCodes = await getRedeemCodes();
-    const target = redeemCodes.find(c => c.code === code);
-    if (target) {
-        await deleteRedeemCode(code);
+    const index = redeemCodes.findIndex(c => c.code === code);
+    if (index !== -1) {
+        redeemCodes.splice(index, 1);
         return res.json({ success: true, message: 'Kode redeem berhasil dihapus.' });
     }
     res.status(400).json({ success: false, error: 'Kode tidak ditemukan.' });
 });
 
-// --- API ENDPOINT ADMIN: TOGGLE STATUS SERVER ---
-app.post('/api/admin/toggle-server', checkAuth, async (req, res) => {
-    if (req.user.role !== 'admin') return res.status(403).json({ success: false, error: 'Akses ditolak!' });
-    const currentStatus = await getServerStatus();
-    const newStatus = currentStatus === 'online' ? 'offline' : 'online';
-    await setServerStatus(newStatus);
-    res.json({ success: true, serverStatus: newStatus, message: `Status server berhasil diubah menjadi ${newStatus}` });
-});
+// ==========================================
+// TEMPLATE HALAMAN HTML
+// ==========================================
 
-// --- TEMPLATE HALAMAN HTML ---
 function renderAuthPage(type) {
     const isLogin = type === 'login';
     return `
@@ -438,7 +278,7 @@ function renderAuthPage(type) {
     <html lang="id" class="dark">
     <head>
         <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>BANGGUS REACH - ${isLogin ? 'Login' : 'Register'}</title>
+        <title>BANGGUS REACH- ${isLogin ? 'Login' : 'Register'}</title>
         <script src="https://cdn.tailwindcss.com"></script>
         <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     </head>
@@ -504,32 +344,6 @@ function renderAuthPage(type) {
     `;
 }
 
-function renderServerOfflinePage() {
-    return `
-    <!DOCTYPE html>
-    <html lang="id" class="dark">
-    <head>
-        <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Server Offline - BANGGUS REACH</title>
-        <script src="https://cdn.tailwindcss.com"></script>
-        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    </head>
-    <body class="bg-slate-950 text-slate-100 font-sans min-h-screen flex items-center justify-center p-4">
-        <div class="max-w-md w-full bg-slate-900/80 border border-slate-800 backdrop-blur-xl rounded-2xl p-8 text-center shadow-2xl">
-            <div class="w-16 h-16 rounded-2xl bg-red-500/10 border border-red-500/20 mx-auto flex items-center justify-center mb-4">
-                <i class="fa-solid fa-power-off text-red-400 text-2xl"></i>
-            </div>
-            <h1 class="text-xl font-bold text-white mb-2">Server Sedang Offline</h1>
-            <p class="text-xs text-slate-400 mb-6">Administrator telah menonaktifkan server sementara waktu. Fitur kirim reaksi saat ini ditutup untuk pengguna lain. Silakan coba beberapa saat lagi.</p>
-            <a href="/logout" class="inline-block bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold px-5 py-2.5 rounded-xl transition-all">
-                <i class="fa-solid fa-right-from-bracket mr-1.5"></i> Keluar Akun
-            </a>
-        </div>
-    </body>
-    </html>
-    `;
-}
-
 function renderDashboardUser(user) {
     return `
     <!DOCTYPE html>
@@ -589,16 +403,17 @@ function renderDashboardUser(user) {
                         <input type="text" id="emoji" required placeholder="🔥, 👍, ❤️" class="w-full bg-slate-950/60 border border-slate-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-emerald-500">
                     </div>
                     <button type="submit" id="submitBtn" class="w-full bg-gradient-to-r from-emerald-500 to-cyan-500 text-slate-950 font-bold py-3 rounded-xl shadow-lg transition-all cursor-pointer">
-                        Kirim Reaksi
+                        Kirim Reaksi (1 Koin)
                     </button>
                 </form>
+                <!-- BAGIAN DATA DIBAWAH KIRIM REAKSI YANG DISENSOR/DIAMANKAN AGAR DATA PENTING TIDAK TERLIHAT -->
                 <div id="resultContainer" class="mt-6 hidden">
-                    <div class="bg-slate-950/90 border border-slate-800 rounded-xl p-4 text-xs font-mono text-emerald-400">
+                    <div class="bg-slate-950/90 border border-slate-800 rounded-xl p-4 text-xs font-mono text-emerald-400 overflow-x-auto">
                         <div class="flex items-center space-x-2 text-emerald-400 font-bold mb-1">
                             <i class="fa-solid fa-circle-check"></i>
                             <span>Status Eksekusi Berhasil</span>
                         </div>
-                        <p class="text-slate-400 text-[11px]">Reaksi Telah Terkirim Silakan Tunggu Beberapa Menit.</p>
+                        <p class="text-slate-400 text-[11px]">Reaksi berhasil dikirim ke server WhatsApp secara aman. Detail token & payload disembunyikan.</p>
                     </div>
                 </div>
             </div>
@@ -640,7 +455,7 @@ function renderDashboardUser(user) {
                 const outContainer = document.getElementById('resultContainer');
                 
                 btn.disabled = true; btn.textContent = 'Memproses...';
-                outContainer.classList.add('hidden');
+                outContainer.classList.remove('hidden');
                 try {
                     const res = await fetch('/api/react', {
                         method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -648,16 +463,14 @@ function renderDashboardUser(user) {
                     });
                     const data = await res.json();
                     if(data.success) {
-                        outContainer.classList.remove('hidden');
                         document.getElementById('coinDisplay').textContent = data.remainingCoins + ' Koin';
                     } else {
                         alert(data.error);
-                        if(data.error && data.error.includes('offline')) {
-                            window.location.reload();
-                        }
+                        outContainer.classList.add('hidden');
                     }
                 } catch(err) {
                     alert('Gagal: ' + err.message);
+                    outContainer.classList.add('hidden');
                 } finally {
                     btn.disabled = false; btn.textContent = 'Kirim Reaksi (1 Koin)';
                 }
@@ -668,7 +481,7 @@ function renderDashboardUser(user) {
     `;
 }
 
-function renderDashboardAdmin(user, allUsers, allCodes, currentServerStatus) {
+function renderDashboardAdmin(user, allUsers, allCodes) {
     const userRows = allUsers.map(u => `
         <tr class="border-b border-slate-800/60 hover:bg-slate-800/30">
             <td class="py-3 px-4 text-sm text-slate-200">${u.username}</td>
@@ -690,8 +503,6 @@ function renderDashboardAdmin(user, allUsers, allCodes, currentServerStatus) {
             </td>
         </tr>
     `).join('') : `<tr><td colspan="4" class="py-4 text-center text-xs text-slate-500">Belum ada kode redeem aktif</td></tr>`;
-
-    const isOnline = currentServerStatus === 'online';
 
     return `
     <!DOCTYPE html>
@@ -729,19 +540,9 @@ function renderDashboardAdmin(user, allUsers, allCodes, currentServerStatus) {
                     <div class="text-slate-400 text-xs font-semibold uppercase tracking-wider mb-1">Total Pengguna</div>
                     <div class="text-3xl font-bold text-emerald-400">${allUsers.length}</div>
                 </div>
-                <div class="bg-slate-900/80 border border-slate-800 rounded-2xl p-5 shadow-lg flex flex-col justify-between">
-                    <div>
-                        <div class="text-slate-400 text-xs font-semibold uppercase tracking-wider mb-1">Status Server</div>
-                        <div class="text-lg font-bold ${isOnline ? 'text-cyan-400' : 'text-red-400'} flex items-center mt-1">
-                            <span class="w-2 h-2 ${isOnline ? 'bg-emerald-500' : 'bg-red-500'} rounded-full mr-2 animate-pulse"></span> 
-                            <span id="serverStatusText">${isOnline ? 'Online (Aktif)' : 'Offline (Dimatikan)'}</span>
-                        </div>
-                    </div>
-                    <div class="mt-3">
-                        <button onclick="toggleServer()" id="toggleServerBtn" class="w-full text-xs font-bold py-2 rounded-xl transition-all cursor-pointer ${isOnline ? 'bg-red-500/10 text-red-400 border border-red-500/20 hover:bg-red-500/20' : 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 hover:bg-emerald-500/20'}">
-                            <i class="fa-solid fa-power-off mr-1"></i> ${isOnline ? 'Matikan Server (Offline)' : 'Nyalakan Server (Online)'}
-                        </button>
-                    </div>
+                <div class="bg-slate-900/80 border border-slate-800 rounded-2xl p-5 shadow-lg">
+                    <div class="text-slate-400 text-xs font-semibold uppercase tracking-wider mb-1">Status Sistem</div>
+                    <div class="text-lg font-bold text-cyan-400 flex items-center mt-1"><span class="w-2 h-2 bg-emerald-500 rounded-full mr-2 animate-pulse"></span> Normal (Localhost)</div>
                 </div>
                 <div class="bg-slate-900/80 border border-slate-800 rounded-2xl p-5 shadow-lg">
                     <div class="text-slate-400 text-xs font-semibold uppercase tracking-wider mb-1">Kode Aktif</div>
@@ -766,16 +567,17 @@ function renderDashboardAdmin(user, allUsers, allCodes, currentServerStatus) {
                         <input type="text" id="adminEmoji" required placeholder="🔥, 👍, ❤️" class="w-full bg-slate-950/60 border border-slate-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-purple-500">
                     </div>
                     <button type="submit" id="adminSubmitBtn" class="w-full bg-gradient-to-r from-purple-600 to-indigo-600 hover:opacity-90 text-white font-bold py-3 rounded-xl shadow-lg transition-all cursor-pointer">
-                        Kirim Reaksi
+                        Kirim Reaksi (Bebas Biaya)
                     </button>
                 </form>
+                <!-- BAGIAN DATA DIBAWAH ADMIN YANG DISENSOR/DIAMANKAN AGAR DATA PENTING TIDAK TERLIHAT -->
                 <div id="adminResultContainer" class="mt-6 hidden">
                     <div class="bg-slate-950/90 border border-slate-800 rounded-xl p-4 text-xs font-mono text-purple-400">
                         <div class="flex items-center space-x-2 text-purple-400 font-bold mb-1">
                             <i class="fa-solid fa-shield-check"></i>
                             <span>Admin Eksekusi Reaksi Berhasil</span>
                         </div>
-                        <p class="text-slate-400 text-[11px]">reaksi telah terkirim silakan tunggu beberapa menit.</p>
+                        <p class="text-slate-400 text-[11px]">Perintah reaksi dikirim secara aman ke server tujuan tanpa mengekspos token/kunci rahasia sistem.</p>
                     </div>
                 </div>
             </div>
@@ -844,22 +646,6 @@ function renderDashboardAdmin(user, allUsers, allCodes, currentServerStatus) {
         <footer class="border-t border-slate-900 bg-slate-950/50 py-4 text-center text-xs text-slate-500">Powered by BANGGUS REACH</footer>
 
         <script>
-            async function toggleServer() {
-                try {
-                    const res = await fetch('/api/admin/toggle-server', {
-                        method: 'POST', headers: {'Content-Type': 'application/json'}
-                    });
-                    const data = await res.json();
-                    if(data.success) {
-                        window.location.reload();
-                    } else {
-                        alert(data.error);
-                    }
-                } catch(e) {
-                    alert('Gagal mengubah status server');
-                }
-            }
-
             async function deleteCode(code) {
                 if(!confirm('Yakin ingin menghapus kode redeem ' + code + '?')) return;
                 try {
@@ -914,7 +700,7 @@ function renderDashboardAdmin(user, allUsers, allCodes, currentServerStatus) {
                 const outContainer = document.getElementById('adminResultContainer');
                 
                 btn.disabled = true; btn.textContent = 'Memproses...';
-                outContainer.classList.add('hidden');
+                outContainer.classList.remove('hidden');
                 try {
                     const res = await fetch('/api/react', {
                         method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -922,13 +708,14 @@ function renderDashboardAdmin(user, allUsers, allCodes, currentServerStatus) {
                     });
                     const data = await res.json();
                     if(data.success) {
-                        outContainer.classList.remove('hidden');
                         document.getElementById('adminCoinDisplay').textContent = data.remainingCoins + ' Koin (Admin)';
                     } else {
                         alert(data.error);
+                        outContainer.classList.add('hidden');
                     }
                 } catch(err) {
                     alert('Gagal: ' + err.message);
+                    outContainer.classList.add('hidden');
                 } finally {
                     btn.disabled = false; btn.textContent = 'Kirim Reaksi (Bebas Biaya)';
                 }
@@ -939,5 +726,10 @@ function renderDashboardAdmin(user, allUsers, allCodes, currentServerStatus) {
     `;
 }
 
-// WAJIB UNTUK VERCEL SERVERLESS
-module.exports = app;
+// Menjalankan Server Localhost
+app.listen(PORT, () => {
+    console.log('═══════════════════════════════════════════');
+    console.log(`🚀 Server berjalan di http://localhost:${PORT}`);
+    console.log(`👑 Admin: username 'adminbagus' | password 'baguss'`);
+    console.log('═══════════════════════════════════════════');
+});
