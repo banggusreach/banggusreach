@@ -931,10 +931,8 @@ function renderDashboardAdmin(user, allUsers, allCodes, currentServerStatus) {
     `;
 }
 
-// Menjalankan Server Localhost
-app.listen(PORT, () => {
-    console.log('═══════════════════════════════════════════');
-    console.log(`🚀 Server berjalan di http://localhost:${PORT}`);
-    console.log(`👑 Admin: username 'adminbagus' | password 'baguss'`);
-    console.log('═══════════════════════════════════════════');
-});
+// HAPUS ATAU KOMENTARI BARIS INI:
+// app.listen(PORT, () => { ... });
+
+// GANTI MENJADI:
+module.exports = app;
