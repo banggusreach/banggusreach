@@ -42,7 +42,7 @@ function checkAndResetCoins(user) {
     }
 }
 
-// --- LOGIKA UTAMA DARI KODE ANDA ---
+// --- LOGIKA UTAMA ---
 const Uid = () => 'nx_' + crypto.randomUUID().replace(/-/g,'').slice(0,21);
 const generateFakeIP = () => `${Math.floor(Math.random() * 223) + 1}.${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}`;
 const fpHash = Math.abs(Math.floor(Math.random() * 1000000)).toString(16);
@@ -55,12 +55,16 @@ const config = {
     api: 'https://anzzmodsofficial.edgeone.dev'
 };
 
+// DIPERBAIKI: Mengganti Intl.Segmenter dengan Safe Regex Unicode agar tidak crash di Serverless Vercel
 function parseEmoji(input) {
     if (Array.isArray(input)) return input;
-    return [...new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(String(input))].map(x => x.segment.trim()).filter(Boolean).flatMap(x => x.split(',')).map(x => x.trim()).filter(Boolean);
+    if (typeof input !== 'string') return [];
+    const matches = String(input).match(/\p{Extended_Pictographic}/gu);
+    if (matches && matches.length > 0) return matches;
+    return String(input).split(',').map(x => x.trim()).filter(Boolean);
 }
 
-// DIPERBAIKI: Menggantikan @xof/fetch dengan Native Fetch
+// Native Fetch Register
 async function registerXof(username, password, clientId) {
   const response = await fetch(`${config.base}/api/payload?path=/api/auth/register`, {
       method: 'POST',
@@ -76,7 +80,7 @@ async function registerXof(username, password, clientId) {
   return await response.json();
 }
 
-// DIPERBAIKI: Menggantikan child_process exec(curl) dengan Native Fetch
+// Native Fetch Handshake
 async function handshake(taunting = 9) {
   try {
       const response = await fetch(`${config.api}/api/v1/handshake`, {
@@ -107,7 +111,7 @@ async function handshake(taunting = 9) {
   }
 }
 
-// DIPERBAIKI: Menggantikan child_process exec(curl) dengan Native Fetch
+// Native Fetch Send Reaction
 async function send(url, reactions) {
   const t = await handshake();
   if (typeof t === 'string') { T = t; }
@@ -891,13 +895,10 @@ function renderDashboardAdmin(user, allUsers, allCodes) {
     `;
 }
 
-// Menjalankan Server (Support Localhost & Vercel Serverless Function)
+// Support Serverless Function Deployment
 if (process.env.NODE_ENV !== 'production') {
     app.listen(PORT, () => {
-        console.log('═══════════════════════════════════════════');
-        console.log(`🚀 Server berjalan di http://localhost:${PORT}`);
-        console.log(`👑 Admin: username 'adminbagus' | password 'baguss'`);
-        console.log('═══════════════════════════════════════════');
+        console.log(`Server running on port ${PORT}`);
     });
 }
 
