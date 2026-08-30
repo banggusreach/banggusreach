@@ -1,7 +1,5 @@
 const express = require('express');
 const crypto = require('crypto');
-const { exec } = require('node:child_process');
-const Go = require('@xof/fetch');
 const cookieParser = require('cookie-parser');
 const Pusher = require('pusher');
 
@@ -45,13 +43,10 @@ function checkAndResetCoins(user) {
 }
 
 // --- LOGIKA UTAMA DARI KODE ANDA ---
-const Random = () => Math.floor(Math.random() * 10000000);
 const Uid = () => 'nx_' + crypto.randomUUID().replace(/-/g,'').slice(0,21);
-const Password = () => crypto.randomBytes(7).toString('base64') + 'XOF-A1!';
 const generateFakeIP = () => `${Math.floor(Math.random() * 223) + 1}.${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}`;
 const fpHash = Math.abs(Math.floor(Math.random() * 1000000)).toString(16);
 const fakeIP = generateFakeIP();
-const fb = () => ({ headers: { 'X-Device-Fingerprint': `fp_${fpHash}`, 'X-Forwarded-For': fakeIP, 'X-Real-IP': fakeIP, 'True-Client-IP': fakeIP } }); 
 let T;
 
 const config = {
@@ -60,58 +55,83 @@ const config = {
     api: 'https://anzzmodsofficial.edgeone.dev'
 };
 
-const go = Go.create({
-    baseURL: config.base,
-    ...fb(),
-    browser: true,
-    cookieJar: false,
-    keepAlive: true
-});
-
 function parseEmoji(input) {
     if (Array.isArray(input)) return input;
     return [...new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(String(input))].map(x => x.segment.trim()).filter(Boolean).flatMap(x => x.split(',')).map(x => x.trim()).filter(Boolean);
 }
 
-async function registerXof(username, password, clientId){
-  const res = await go.post('/api/payload?path=/api/auth/register', {
-      body: { username, password, clientId }
+// DIPERBAIKI: Menggantikan @xof/fetch dengan Native Fetch
+async function registerXof(username, password, clientId) {
+  const response = await fetch(`${config.base}/api/payload?path=/api/auth/register`, {
+      method: 'POST',
+      headers: {
+          'Content-Type': 'application/json',
+          'X-Device-Fingerprint': `fp_${fpHash}`,
+          'X-Forwarded-For': fakeIP,
+          'X-Real-IP': fakeIP,
+          'True-Client-IP': fakeIP
+      },
+      body: JSON.stringify({ username, password, clientId })
   });
-  return res.json();
+  return await response.json();
 }
 
+// DIPERBAIKI: Menggantikan child_process exec(curl) dengan Native Fetch
 async function handshake(taunting = 9) {
-  const res = await new Promise((resolve, reject) => {
-  exec(`curl 'https://anzzmodsofficial.edgeone.dev/api/v1/handshake' -X POST -H 'Accept: */*' -H 'Accept-Language: id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7' -H 'Cache-Control: no-cache' -H 'Connection: keep-alive' -H 'Content-Length: 0' -H 'Origin: https://reach-wa-nexus.vercel.app' -H 'Pragma: no-cache' -H 'Referer: https://reach-wa-nexus.vercel.app/' -H 'Sec-Fetch-Dest: empty' -H 'Sec-Fetch-Mode: cors' -H 'Sec-Fetch-Site: cross-site' -H 'User-Agent: Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36' -H 'X-API-Key: anzz_live_18fc288f3fbc64643542c40197a5713f0aef51e354a6c254' -H 'sec-ch-ua: "Chromium";v="137", "Not/A)Brand";v="24"' -H 'sec-ch-ua-mobile: ?1' -H 'sec-ch-ua-platform: "Android"' --compressed`, (err, stdout) => {
-    if (err) return reject(err);
-    try { resolve(JSON.parse(stdout)); } catch (e) { reject(e); }
-  });
-});
-  if (res.ok && res.token) return res.token;
-  if(typeof res.error === 'string' && res.error.includes('key_')) {
-    let attempt = 0;
-    while(res.error.includes('key_') && attempt < Number(taunting)) {
-        attempt++;
-        await new Promise(r => setTimeout(r, 1000));
-     }
+  try {
+      const response = await fetch(`${config.api}/api/v1/handshake`, {
+          method: 'POST',
+          headers: {
+              'Accept': '*/*',
+              'Accept-Language': 'id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7',
+              'Cache-Control': 'no-cache',
+              'Origin': config.base,
+              'Pragma': 'no-cache',
+              'Referer': `${config.base}/`,
+              'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36',
+              'X-API-Key': config.apikey
+          }
+      });
+      const res = await response.json();
+      if (res.ok && res.token) return res.token;
+      if (typeof res.error === 'string' && res.error.includes('key_')) {
+          let attempt = 0;
+          while (res.error.includes('key_') && attempt < Number(taunting)) {
+              attempt++;
+              await new Promise(r => setTimeout(r, 1000));
+          }
+      }
+      return 0;
+  } catch (e) {
+      return 0;
   }
-  return 0;
 }
 
-async function send(url, reactions){
+// DIPERBAIKI: Menggantikan child_process exec(curl) dengan Native Fetch
+async function send(url, reactions) {
   const t = await handshake();
   if (typeof t === 'string') { T = t; }
   reactions = parseEmoji(reactions);
   const isValid = /^https:\/\/(?:www\.)?whatsapp\.com\/channel\/[A-Za-z0-9]+\/\d+$/.test(url);
-  if(!isValid) throw new Error('invalid url (Pastikan format link channel WhatsApp benar)');
-  
-  const res = await new Promise((resolve, reject) => { 
-   exec(`curl '${config.api}/api/v1/react' -X POST -H 'Accept: */*' -H 'Accept-Language: id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7' -H 'Cache-Control: no-cache' -H 'Connection: keep-alive' -H 'Content-Type: application/json' -H 'Origin: https://reach-wa-nexus.vercel.app' -H 'Pragma: no-cache' -H 'Referer: https://reach-wa-nexus.vercel.app/' -H 'Sec-Fetch-Dest: empty' -H 'Sec-Fetch-Mode: cors' -H 'Sec-Fetch-Site: cross-site' -H 'User-Agent: Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36' -H 'X-API-Key: ${config.apikey}' -H 'X-Handshake-Token: ${T}' -H 'sec-ch-ua: "Chromium";v="137", "Not/A)Brand";v="24"' -H 'sec-ch-ua-mobile: ?1' -H 'sec-ch-ua-platform: "Android"' --data-raw '${JSON.stringify({ url, reactions })}' --compressed`, (err, stdout) => {
-    if (err) return reject(err);
-    try { resolve(JSON.parse(stdout)); } catch (e) { reject(e); }
+  if (!isValid) throw new Error('invalid url (Pastikan format link channel WhatsApp benar)');
+
+  const response = await fetch(`${config.api}/api/v1/react`, {
+      method: 'POST',
+      headers: {
+          'Accept': '*/*',
+          'Accept-Language': 'id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7',
+          'Cache-Control': 'no-cache',
+          'Content-Type': 'application/json',
+          'Origin': config.base,
+          'Pragma': 'no-cache',
+          'Referer': `${config.base}/`,
+          'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36',
+          'X-API-Key': config.apikey,
+          'X-Handshake-Token': T || ''
+      },
+      body: JSON.stringify({ url, reactions })
   });
-});
-  return res;
+  return await response.json();
 }
 
 // --- MIDDLEWARE AUTENTIKASI ---
@@ -424,7 +444,6 @@ function renderDashboardUser(user) {
         </header>
 
         <main class="max-w-3xl w-full mx-auto px-4 py-8 flex-grow space-y-6">
-            <!-- FITUR REAKSI & REDEEM -->
             <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <div class="bg-slate-900/80 border border-slate-800 rounded-2xl p-6 shadow-xl">
                     <h3 class="text-sm font-bold text-white mb-2"><i class="fa-solid fa-ticket mr-2 text-emerald-400"></i>Kode Redeem</h3>
@@ -447,7 +466,6 @@ function renderDashboardUser(user) {
                 </div>
             </div>
 
-            <!-- GLOBAL LIVE CHAT COMMUNITY -->
             <div class="bg-slate-900/80 border border-slate-800 rounded-2xl p-6 shadow-2xl">
                 <div class="flex justify-between items-center mb-4">
                     <div>
@@ -464,9 +482,7 @@ function renderDashboardUser(user) {
                     </div>
                 </div>
 
-                <!-- Chat Box Area -->
                 <div id="chatBox" class="h-80 overflow-y-auto bg-slate-950/70 border border-slate-800/80 rounded-xl p-4 space-y-3 mb-4 text-xs">
-                    <!-- Pesan real-time dari semua user tampil di sini -->
                 </div>
 
                 <form id="chatForm" class="flex gap-2">
@@ -484,7 +500,6 @@ function renderDashboardUser(user) {
             const currentUsername = "${user.username}";
             const currentRole = "${user.role}";
             
-            // Inisialisasi Pusher Client Side
             const pusher = new Pusher("${PUSHER_KEY}", { cluster: 'ap1' });
             const channel = pusher.subscribe('global-chat-channel');
 
@@ -518,12 +533,10 @@ function renderDashboardUser(user) {
                 chatBox.scrollTop = chatBox.scrollHeight;
             }
 
-            // Mendengar event pesan baru dari Pusher
             channel.bind('new_message', function(msg) {
                 appendMessage(msg);
             });
 
-            // Kirim pesan via HTTP Endpoint Vercel
             chatForm.addEventListener('submit', async (e) => {
                 e.preventDefault();
                 const text = chatInput.value;
@@ -537,7 +550,6 @@ function renderDashboardUser(user) {
                 }
             });
 
-            // REDEEM & REACT FORM HANDLERS
             document.getElementById('redeemForm').addEventListener('submit', async (e) => {
                 e.preventDefault();
                 const code = document.getElementById('redeemCodeInput').value;
@@ -667,7 +679,6 @@ function renderDashboardAdmin(user, allUsers, allCodes) {
                 </div>
             </div>
 
-            <!-- CHAT ROOM GLOBAL LIVE ADMIN -->
             <div class="bg-slate-900/80 border border-slate-800 rounded-2xl p-6 shadow-2xl">
                 <div class="flex justify-between items-center mb-4">
                     <div>
@@ -679,7 +690,6 @@ function renderDashboardAdmin(user, allUsers, allCodes) {
                 </div>
 
                 <div id="adminChatBox" class="h-72 overflow-y-auto bg-slate-950/70 border border-slate-800/80 rounded-xl p-4 space-y-3 mb-4 text-xs">
-                    <!-- Chat Realtime -->
                 </div>
 
                 <form id="adminChatForm" class="flex gap-2">
@@ -690,7 +700,6 @@ function renderDashboardAdmin(user, allUsers, allCodes) {
                 </form>
             </div>
 
-            <!-- FUNGSI REAKSI & KODE REDEEM -->
             <div class="bg-slate-900/80 border border-slate-800 rounded-2xl p-6 shadow-2xl">
                 <h2 class="text-lg font-bold text-white mb-4"><i class="fa-solid fa-bolt mr-2 text-purple-400"></i>Kirim Reaksi WhatsApp (Admin)</h2>
                 <form id="adminReactForm" class="space-y-4">
@@ -756,7 +765,6 @@ function renderDashboardAdmin(user, allUsers, allCodes) {
             const currentUsername = "${user.username}";
             const currentRole = "${user.role}";
             
-            // Inisialisasi Pusher Client Side
             const pusher = new Pusher("${PUSHER_KEY}", { cluster: 'ap1' });
             const channel = pusher.subscribe('global-chat-channel');
 
