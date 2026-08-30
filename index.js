@@ -1,53 +1,124 @@
 const express = require('express');
 const crypto = require('crypto');
+const Go = require('@xof/fetch');
 const cookieParser = require('cookie-parser');
-const Pusher = require('pusher');
+const { initializeApp } = require('firebase/app');
+const { getDatabase, ref, get, set, update, remove, child } = require('firebase/database');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
-
-// --- KONFIGURASI PUSHER FOR VERCEL REAL-TIME ---
-const PUSHER_KEY = process.env.PUSHER_KEY || "60635481dadc77515254";
-const pusher = new Pusher({
-  appId: process.env.PUSHER_APP_ID || "2190190",
-  key: PUSHER_KEY,
-  secret: process.env.PUSHER_SECRET || "6a372a5e062d3878dd2b",
-  cluster: process.env.PUSHER_CLUSTER || "ap1",
-  useTLS: true
-});
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 
-// --- DATABASE MEMORI ---
-const users = [
-    { username: 'adminbagus', password: 'baguss', role: 'admin', coins: 99999, clientId: 'nx_admin00000000000000', redeemedCodes: [], lastCoinReset: Date.now() }
-];
-const redeemCodes = [];
+// --- INISIALISASI FIREBASE ---
+const firebaseConfig = {
+    apiKey: "AIzaSyCg1K6T7IZ4ldhX6ehn9uC_KfRrFSSv9ec",
+    authDomain: "jualakunbs.firebaseapp.com",
+    databaseURL: "https://jualakunbs-default-rtdb.firebaseio.com",
+    projectId: "jualakunbs",
+    storageBucket: "jualakunbs.firebasestorage.app",
+    messagingSenderId: "341323679179",
+    appId: "1:341323679179:web:0167d4d9e3661c553d624e"
+};
+
+const firebaseApp = initializeApp(firebaseConfig);
+const db = getDatabase(firebaseApp);
 const sessions = new Map();
 
+// --- INISIALISASI DATA AWAL DI FIREBASE ---
+async function initializeDatabase() {
+    try {
+        const dbRef = ref(db);
+        
+        // Cek apakah admin sudah ada
+        const adminSnap = await get(child(dbRef, 'users/adminbagus'));
+        if (!adminSnap.exists()) {
+            await set(ref(db, 'users/adminbagus'), {
+                username: 'adminbagus',
+                password: 'baguss',
+                role: 'admin',
+                coins: 99999,
+                clientId: 'nx_admin00000000000000',
+                redeemedCodes: [],
+                lastCoinReset: Date.now()
+            });
+        }
+
+        // Cek status server
+        const statusSnap = await get(child(dbRef, 'system/serverStatus'));
+        if (!statusSnap.exists()) {
+            await set(ref(db, 'system/serverStatus'), 'online');
+        }
+    } catch (e) {
+        console.error('Gagal menginisialisasi database Firebase:', e.message);
+    }
+}
+initializeDatabase();
+
+// --- FUNGSI HELPER DATABASE ---
+async function getUsers() {
+    const snapshot = await get(ref(db, 'users'));
+    if (!snapshot.exists()) return [];
+    return Object.values(snapshot.val());
+}
+
+async function getUserByUsername(username) {
+    const snapshot = await get(ref(db, `users/${username}`));
+    if (!snapshot.exists()) return null;
+    return snapshot.val();
+}
+
+async function saveUser(user) {
+    await set(ref(db, `users/${user.username}`), user);
+}
+
+async function getRedeemCodes() {
+    const snapshot = await get(ref(db, 'redeemCodes'));
+    if (!snapshot.exists()) return [];
+    return Object.values(snapshot.val());
+}
+
+async function saveRedeemCode(codeObj) {
+    await set(ref(db, `redeemCodes/${codeObj.code}`), codeObj);
+}
+
+async function deleteRedeemCode(code) {
+    await remove(ref(db, `redeemCodes/${code}`));
+}
+
+async function getServerStatus() {
+    const snapshot = await get(ref(db, 'system/serverStatus'));
+    return snapshot.exists() ? snapshot.val() : 'online';
+}
+
+async function setServerStatus(status) {
+    await set(ref(db, 'system/serverStatus'), status);
+}
+
 // --- FUNGSI HELPER RESET KOIN 24 JAM ---
-function checkAndResetCoins(user) {
+async function checkAndResetCoins(user) {
     if (user.role === 'admin') return;
     const now = Date.now();
     const twentyFourHours = 24 * 60 * 60 * 1000;
     if (!user.lastCoinReset) {
         user.lastCoinReset = now;
+        await saveUser(user);
     } else if (now - user.lastCoinReset >= twentyFourHours) {
         if (user.coins <= 0) {
-            user.coins = 3;
+            user.coins = 3; // Reset koin kembali ke 3 jika habis setelah 24 jam
         }
         user.lastCoinReset = now;
+        await saveUser(user);
     }
 }
 
-// --- LOGIKA UTAMA ---
+// --- LOGIKA UTAMA DARI KODE ANDA ---
 const Uid = () => 'nx_' + crypto.randomUUID().replace(/-/g,'').slice(0,21);
 const generateFakeIP = () => `${Math.floor(Math.random() * 223) + 1}.${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}`;
 const fpHash = Math.abs(Math.floor(Math.random() * 1000000)).toString(16);
 const fakeIP = generateFakeIP();
-let T;
+const fb = () => ({ headers: { 'X-Device-Fingerprint': `fp_${fpHash}`, 'X-Forwarded-For': fakeIP, 'X-Real-IP': fakeIP, 'True-Client-IP': fakeIP } }); 
 
 const config = {
     base: "https://reach-wa-nexus.vercel.app",
@@ -55,97 +126,121 @@ const config = {
     api: 'https://anzzmodsofficial.edgeone.dev'
 };
 
-// DIPERBAIKI: Mengganti Intl.Segmenter dengan Safe Regex Unicode agar tidak crash di Serverless Vercel
+const go = Go.create({
+    baseURL: config.base,
+    ...fb(),
+    browser: true,
+    cookieJar: false,
+    keepAlive: true
+});
+
 function parseEmoji(input) {
     if (Array.isArray(input)) return input;
-    if (typeof input !== 'string') return [];
-    const matches = String(input).match(/\p{Extended_Pictographic}/gu);
-    if (matches && matches.length > 0) return matches;
-    return String(input).split(',').map(x => x.trim()).filter(Boolean);
+    return [...new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(String(input))].map(x => x.segment.trim()).filter(Boolean).flatMap(x => x.split(',')).map(x => x.trim()).filter(Boolean);
 }
 
-// Native Fetch Register
-async function registerXof(username, password, clientId) {
-  const response = await fetch(`${config.base}/api/payload?path=/api/auth/register`, {
-      method: 'POST',
-      headers: {
-          'Content-Type': 'application/json',
-          'X-Device-Fingerprint': `fp_${fpHash}`,
-          'X-Forwarded-For': fakeIP,
-          'X-Real-IP': fakeIP,
-          'True-Client-IP': fakeIP
-      },
-      body: JSON.stringify({ username, password, clientId })
+async function registerXof(username, password, clientId){
+  const res = await go.post('/api/payload?path=/api/auth/register', {
+      body: { username, password, clientId }
   });
-  return await response.json();
+  return res.json();
 }
 
-// Native Fetch Handshake
+// --- PERBAIKAN FUNGSI HANDSHAKE (PER-REQUEST LOOP RETRY) ---
 async function handshake(taunting = 9) {
+  let attempt = 0;
+  while (attempt < Number(taunting)) {
+      try {
+          const response = await fetch('https://anzzmodsofficial.edgeone.dev/api/v1/handshake', {
+              method: 'POST',
+              headers: {
+                  'Accept': '*/*',
+                  'Accept-Language': 'id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7',
+                  'Cache-Control': 'no-cache',
+                  'Connection': 'keep-alive',
+                  'Content-Length': '0',
+                  'Origin': 'https://reach-wa-nexus.vercel.app',
+                  'Pragma': 'no-cache',
+                  'Referer': 'https://reach-wa-nexus.vercel.app/',
+                  'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36',
+                  'X-API-Key': config.apikey,
+                  'sec-ch-ua': '"Chromium";v="137", "Not/A)Brand";v="24"',
+                  'sec-ch-ua-mobile': '?1',
+                  'sec-ch-ua-platform': '"Android"'
+              }
+          });
+          const resData = await response.json();
+
+          if (resData.ok && resData.token) {
+              return resData.token;
+          }
+
+          if (typeof resData.error === 'string' && resData.error.includes('key_')) {
+              attempt++;
+              await new Promise(r => setTimeout(r, 1500));
+              continue;
+          }
+      } catch (e) {
+          attempt++;
+          await new Promise(r => setTimeout(r, 1000));
+      }
+  }
+  throw new Error('Gagal mendapatkan token Handshake (API Key sibuk atau terlimit)');
+}
+
+// --- PERBAIKAN FUNGSI SEND (ISOLASI TOKEN LOKAL & VALIDASI UPSTREAM) ---
+async function send(url, reactions){
+  const handshakeToken = await handshake();
+  if (!handshakeToken) {
+      throw new Error('Token Handshake tidak valid.');
+  }
+
+  reactions = parseEmoji(reactions);
+  const isValid = /^https:\/\/(?:www\.)?whatsapp\.com\/channel\/[A-Za-z0-9]+\/\d+$/.test(url);
+  if(!isValid) throw new Error('invalid url (Pastikan format link channel WhatsApp benar)');
+  
+  let resData;
   try {
-      const response = await fetch(`${config.api}/api/v1/handshake`, {
+      const response = await fetch(`${config.api}/api/v1/react`, {
           method: 'POST',
           headers: {
               'Accept': '*/*',
               'Accept-Language': 'id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7',
               'Cache-Control': 'no-cache',
-              'Origin': config.base,
+              'Connection': 'keep-alive',
+              'Content-Type': 'application/json',
+              'Origin': 'https://reach-wa-nexus.vercel.app',
               'Pragma': 'no-cache',
-              'Referer': `${config.base}/`,
+              'Referer': 'https://reach-wa-nexus.vercel.app/',
               'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36',
-              'X-API-Key': config.apikey
-          }
+              'X-API-Key': config.apikey,
+              'X-Handshake-Token': handshakeToken,
+              'sec-ch-ua': '"Chromium";v="137", "Not/A)Brand";v="24"',
+              'sec-ch-ua-mobile': '?1',
+              'sec-ch-ua-platform': '"Android"'
+          },
+          body: JSON.stringify({ url, reactions })
       });
-      const res = await response.json();
-      if (res.ok && res.token) return res.token;
-      if (typeof res.error === 'string' && res.error.includes('key_')) {
-          let attempt = 0;
-          while (res.error.includes('key_') && attempt < Number(taunting)) {
-              attempt++;
-              await new Promise(r => setTimeout(r, 1000));
-          }
-      }
-      return 0;
+      resData = await response.json();
   } catch (e) {
-      return 0;
+      throw new Error('Gagal mengirim reaksi: ' + e.message);
   }
-}
 
-// Native Fetch Send Reaction
-async function send(url, reactions) {
-  const t = await handshake();
-  if (typeof t === 'string') { T = t; }
-  reactions = parseEmoji(reactions);
-  const isValid = /^https:\/\/(?:www\.)?whatsapp\.com\/channel\/[A-Za-z0-9]+\/\d+$/.test(url);
-  if (!isValid) throw new Error('invalid url (Pastikan format link channel WhatsApp benar)');
+  if (resData && resData.ok === false) {
+      throw new Error(resData.message || resData.error || 'API Upstream menolak permintaan reaksi');
+  }
 
-  const response = await fetch(`${config.api}/api/v1/react`, {
-      method: 'POST',
-      headers: {
-          'Accept': '*/*',
-          'Accept-Language': 'id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7',
-          'Cache-Control': 'no-cache',
-          'Content-Type': 'application/json',
-          'Origin': config.base,
-          'Pragma': 'no-cache',
-          'Referer': `${config.base}/`,
-          'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36',
-          'X-API-Key': config.apikey,
-          'X-Handshake-Token': T || ''
-      },
-      body: JSON.stringify({ url, reactions })
-  });
-  return await response.json();
+  return resData;
 }
 
 // --- MIDDLEWARE AUTENTIKASI ---
-function checkAuth(req, res, next) {
+async function checkAuth(req, res, next) {
     const token = req.cookies.session_token;
     if (token && sessions.has(token)) {
         const sessionUser = sessions.get(token);
-        const latestUser = users.find(u => u.username === sessionUser.username);
+        const latestUser = await getUserByUsername(sessionUser.username);
         if (latestUser) {
-            checkAndResetCoins(latestUser);
+            await checkAndResetCoins(latestUser);
             req.user = latestUser;
             next();
             return;
@@ -154,71 +249,36 @@ function checkAuth(req, res, next) {
     res.redirect('/login');
 }
 
-function guestOnly(req, res, next) {
-    const token = req.cookies.session_token;
-    if (token && sessions.has(token)) {
-        const sessionUser = sessions.get(token);
-        const latestUser = users.find(u => u.username === sessionUser.username);
-        if (latestUser) {
-            return res.redirect(latestUser.role === 'admin' ? '/admin' : '/');
-        }
-    }
-    next();
-}
+// --- ROUTE HALAMAN AUTH ---
+app.get('/login', (req, res) => res.send(renderAuthPage('login')));
+app.get('/register', (req, res) => res.send(renderAuthPage('register')));
 
-// --- API ENDPOINT FOR PUSHER CHAT REALTIME ---
-app.post('/api/chat/send', checkAuth, async (req, res) => {
-    const { message } = req.body;
-    if (!message || !message.trim()) {
-        return res.status(400).json({ success: false, error: 'Pesan tidak boleh kosong' });
-    }
-
-    const msgPayload = {
-        id: crypto.randomUUID(),
-        username: req.user.username,
-        role: req.user.role,
-        message: message.trim(),
-        time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-    };
-
-    try {
-        await pusher.trigger('global-chat-channel', 'new_message', msgPayload);
-        res.json({ success: true });
-    } catch (err) {
-        res.status(500).json({ success: false, error: 'Gagal mempublikasikan pesan real-time' });
-    }
-});
-
-// --- ROUTE AUTH ---
-app.get('/login', guestOnly, (req, res) => res.send(renderAuthPage('login')));
-app.get('/register', guestOnly, (req, res) => res.send(renderAuthPage('register')));
-
-app.post('/api/auth/login', (req, res) => {
+app.post('/api/auth/login', async (req, res) => {
     const { username, password } = req.body;
-    const user = users.find(u => u.username === username && u.password === password);
-    if (!user) return res.status(400).json({ success: false, error: 'Username atau password salah!' });
+    const user = await getUserByUsername(username);
+    if (!user || user.password !== password) {
+        return res.status(400).json({ success: false, error: 'Username atau password salah!' });
+    }
     
-    checkAndResetCoins(user);
+    await checkAndResetCoins(user);
     const sessionToken = crypto.randomBytes(32).toString('hex');
     sessions.set(sessionToken, user);
-    
-    res.cookie('session_token', sessionToken, { 
-        httpOnly: true, 
-        maxAge: 7 * 24 * 60 * 60 * 1000 
-    });
-    
+    res.cookie('session_token', sessionToken, { httpOnly: true });
     res.json({ success: true, role: user.role });
 });
 
 app.post('/api/auth/register', async (req, res) => {
     const { username, password } = req.body;
     if (!username || !password) return res.status(400).json({ success: false, error: 'Semua kolom wajib diisi!' });
-    if (users.find(u => u.username === username)) return res.status(400).json({ success: false, error: 'Username sudah digunakan!' });
+    
+    const existingUser = await getUserByUsername(username);
+    if (existingUser) return res.status(400).json({ success: false, error: 'Username sudah digunakan!' });
     
     const clientId = Uid();
     try {
         await registerXof(username, password, clientId);
-        users.push({ username, password, role: 'user', coins: 3, clientId, redeemedCodes: [], lastCoinReset: Date.now() });
+        const newUser = { username, password, role: 'user', coins: 3, clientId, redeemedCodes: [], lastCoinReset: Date.now() };
+        await saveUser(newUser);
         res.json({ success: true, message: 'Registrasi berhasil! Anda mendapatkan 3 koin gratis.' });
     } catch (e) {
         res.status(500).json({ success: false, error: 'Gagal mendaftar ke server pusat: ' + e.message });
@@ -233,18 +293,30 @@ app.get('/logout', (req, res) => {
 });
 
 // --- ROUTE DASHBOARD ---
-app.get('/', checkAuth, (req, res) => {
+app.get('/', checkAuth, async (req, res) => {
     if (req.user.role === 'admin') return res.redirect('/admin');
+    const serverStatus = await getServerStatus();
+    if (serverStatus === 'offline') {
+        return res.send(renderServerOfflinePage());
+    }
     res.send(renderDashboardUser(req.user));
 });
 
-app.get('/admin', checkAuth, (req, res) => {
+app.get('/admin', checkAuth, async (req, res) => {
     if (req.user.role !== 'admin') return res.redirect('/');
-    res.send(renderDashboardAdmin(req.user, users, redeemCodes));
+    const allUsers = await getUsers();
+    const redeemCodes = await getRedeemCodes();
+    const serverStatus = await getServerStatus();
+    res.send(renderDashboardAdmin(req.user, allUsers, redeemCodes, serverStatus));
 });
 
 // --- API ENDPOINT REACT ---
 app.post('/api/react', checkAuth, async (req, res) => {
+    const serverStatus = await getServerStatus();
+    if (serverStatus === 'offline' && req.user.role !== 'admin') {
+        return res.status(403).json({ success: false, error: 'Server sedang offline oleh Admin. Anda tidak dapat mengirimkan reach saat ini.' });
+    }
+
     const { link, emoji } = req.body;
     if (!link || !emoji) return res.status(400).json({ success: false, error: 'Link & emoji wajib diisi!' });
     
@@ -254,27 +326,30 @@ app.post('/api/react', checkAuth, async (req, res) => {
 
     try {
         const result = await send(link, emoji);
+        
         if (req.user.role !== 'admin') {
             req.user.coins -= 1;
+            await saveUser(req.user);
         }
         res.json({ success: true, remainingCoins: req.user.coins, result });
     } catch (e) {
-        res.json({ success: false, error: e.message });
+        res.status(500).json({ success: false, error: e.message });
     }
 });
 
-// --- API REDEEM & ADMIN ---
-app.post('/api/redeem', checkAuth, (req, res) => {
+// --- API ENDPOINT REDEEM KODE ---
+app.post('/api/redeem', checkAuth, async (req, res) => {
     const { code } = req.body;
     if (!code) return res.status(400).json({ success: false, error: 'Kode redeem wajib diisi!' });
 
-    const targetCodeIndex = redeemCodes.findIndex(c => c.code === code.trim().toUpperCase());
-    if (targetCodeIndex === -1) return res.status(400).json({ success: false, error: 'Kode redeem tidak valid!' });
-
-    const targetCode = redeemCodes[targetCodeIndex];
+    const formattedCode = code.trim().toUpperCase();
+    const redeemCodes = await getRedeemCodes();
+    const targetCode = redeemCodes.find(c => c.code === formattedCode);
+    
+    if (!targetCode) return res.status(400).json({ success: false, error: 'Kode redeem tidak valid!' });
 
     if (targetCode.quota <= 0) {
-        redeemCodes.splice(targetCodeIndex, 1);
+        await deleteRedeemCode(targetCode.code);
         return res.status(400).json({ success: false, error: 'Kuota kode redeem ini sudah habis dan telah dihapus dari sistem!' });
     }
 
@@ -286,17 +361,21 @@ app.post('/api/redeem', checkAuth, (req, res) => {
     const earnedCoins = Math.floor(Math.random() * (targetCode.maxCoins - targetCode.minCoins + 1)) + targetCode.minCoins;
     
     req.user.coins += earnedCoins;
-    targetCode.quota -= 1;
     req.user.redeemedCodes.push(targetCode.code);
+    await saveUser(req.user);
 
+    targetCode.quota -= 1;
     if (targetCode.quota <= 0) {
-        redeemCodes.splice(targetCodeIndex, 1);
+        await deleteRedeemCode(targetCode.code);
+    } else {
+        await saveRedeemCode(targetCode);
     }
 
     res.json({ success: true, earnedCoins, totalCoins: req.user.coins, message: `Berhasil menukar kode! Anda mendapatkan ${earnedCoins} koin.` });
 });
 
-app.post('/api/admin/create-code', checkAuth, (req, res) => {
+// --- API ENDPOINT ADMIN: BUAT KODE REDEEM ---
+app.post('/api/admin/create-code', checkAuth, async (req, res) => {
     if (req.user.role !== 'admin') return res.status(403).json({ success: false, error: 'Akses ditolak!' });
     
     const { code, minCoins, maxCoins, quota } = req.body;
@@ -305,6 +384,7 @@ app.post('/api/admin/create-code', checkAuth, (req, res) => {
     }
 
     const formattedCode = code.trim().toUpperCase();
+    const redeemCodes = await getRedeemCodes();
     if (redeemCodes.some(c => c.code === formattedCode)) {
         return res.status(400).json({ success: false, error: 'Kode redeem sudah ada!' });
     }
@@ -317,31 +397,40 @@ app.post('/api/admin/create-code', checkAuth, (req, res) => {
         return res.status(400).json({ success: false, error: 'Min Koin tidak boleh lebih besar dari Max Koin!' });
     }
 
-    redeemCodes.push({
+    const newCode = {
         code: formattedCode,
         minCoins: parsedMin,
         maxCoins: parsedMax,
         quota: parsedQuota
-    });
+    };
 
+    await saveRedeemCode(newCode);
     res.json({ success: true, message: 'Kode redeem berhasil dibuat!' });
 });
 
-app.post('/api/admin/delete-code', checkAuth, (req, res) => {
+// --- API ENDPOINT ADMIN: HAPUS KODE REDEEM MANUAL ---
+app.post('/api/admin/delete-code', checkAuth, async (req, res) => {
     if (req.user.role !== 'admin') return res.status(403).json({ success: false, error: 'Akses ditolak!' });
     const { code } = req.body;
-    const index = redeemCodes.findIndex(c => c.code === code);
-    if (index !== -1) {
-        redeemCodes.splice(index, 1);
+    const redeemCodes = await getRedeemCodes();
+    const target = redeemCodes.find(c => c.code === code);
+    if (target) {
+        await deleteRedeemCode(code);
         return res.json({ success: true, message: 'Kode redeem berhasil dihapus.' });
     }
     res.status(400).json({ success: false, error: 'Kode tidak ditemukan.' });
 });
 
-// ==========================================
-// TEMPLATE HALAMAN HTML
-// ==========================================
+// --- API ENDPOINT ADMIN: TOGGLE STATUS SERVER ---
+app.post('/api/admin/toggle-server', checkAuth, async (req, res) => {
+    if (req.user.role !== 'admin') return res.status(403).json({ success: false, error: 'Akses ditolak!' });
+    const currentStatus = await getServerStatus();
+    const newStatus = currentStatus === 'online' ? 'offline' : 'online';
+    await setServerStatus(newStatus);
+    res.json({ success: true, serverStatus: newStatus, message: `Status server berhasil diubah menjadi ${newStatus}` });
+});
 
+// --- TEMPLATE HALAMAN HTML ---
 function renderAuthPage(type) {
     const isLogin = type === 'login';
     return `
@@ -360,7 +449,7 @@ function renderAuthPage(type) {
                     <i class="fa-solid fa-bolt text-white text-xl"></i>
                 </div>
                 <h1 class="text-xl font-bold text-white">${isLogin ? 'Masuk ke Banggus Reach' : 'Buat Akun Baru'}</h1>
-                <p class="text-xs text-slate-400 mt-1">${isLogin ? 'Silakan masuk dengan akun Anda' : 'Daftar sekarang & bergabung bersama komunitas!'}</p>
+                <p class="text-xs text-slate-400 mt-1">${isLogin ? 'Silakan masuk dengan akun Anda' : 'Daftar sekarang & dapatkan 3 koin gratis!'}</p>
             </div>
             <form id="authForm" class="space-y-4">
                 <div>
@@ -415,6 +504,32 @@ function renderAuthPage(type) {
     `;
 }
 
+function renderServerOfflinePage() {
+    return `
+    <!DOCTYPE html>
+    <html lang="id" class="dark">
+    <head>
+        <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Server Offline - BANGGUS REACH</title>
+        <script src="https://cdn.tailwindcss.com"></script>
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    </head>
+    <body class="bg-slate-950 text-slate-100 font-sans min-h-screen flex items-center justify-center p-4">
+        <div class="max-w-md w-full bg-slate-900/80 border border-slate-800 backdrop-blur-xl rounded-2xl p-8 text-center shadow-2xl">
+            <div class="w-16 h-16 rounded-2xl bg-red-500/10 border border-red-500/20 mx-auto flex items-center justify-center mb-4">
+                <i class="fa-solid fa-power-off text-red-400 text-2xl"></i>
+            </div>
+            <h1 class="text-xl font-bold text-white mb-2">Server Sedang Offline</h1>
+            <p class="text-xs text-slate-400 mb-6">Administrator telah menonaktifkan server sementara waktu. Fitur kirim reaksi saat ini ditutup untuk pengguna lain. Silakan coba beberapa saat lagi.</p>
+            <a href="/logout" class="inline-block bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold px-5 py-2.5 rounded-xl transition-all">
+                <i class="fa-solid fa-right-from-bracket mr-1.5"></i> Keluar Akun
+            </a>
+        </div>
+    </body>
+    </html>
+    `;
+}
+
 function renderDashboardUser(user) {
     return `
     <!DOCTYPE html>
@@ -423,11 +538,10 @@ function renderDashboardUser(user) {
         <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Dashboard - BANGGUS REACH</title>
         <script src="https://cdn.tailwindcss.com"></script>
-        <script src="https://js.pusher.com/8.0.1/pusher.min.js"></script>
         <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     </head>
     <body class="bg-slate-950 text-slate-100 font-sans min-h-screen flex flex-col justify-between">
-        <header class="border-b border-slate-800 bg-slate-900/50 backdrop-blur-md sticky top-0 z-50">
+        <header class="border-b border-slate-800 bg-slate-900/50 backdrop-blur-md">
             <div class="max-w-4xl mx-auto px-6 h-16 flex items-center justify-between">
                 <div class="flex items-center space-x-3">
                     <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-emerald-500 to-cyan-500 flex items-center justify-center">
@@ -447,113 +561,52 @@ function renderDashboardUser(user) {
             </div>
         </header>
 
-        <main class="max-w-3xl w-full mx-auto px-4 py-8 flex-grow space-y-6">
-            <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <div class="bg-slate-900/80 border border-slate-800 rounded-2xl p-6 shadow-xl">
-                    <h3 class="text-sm font-bold text-white mb-2"><i class="fa-solid fa-ticket mr-2 text-emerald-400"></i>Kode Redeem</h3>
-                    <p class="text-xs text-slate-400 mb-4">Tukar kode unik untuk klaim koin acak.</p>
-                    <form id="redeemForm" class="flex gap-2">
-                        <input type="text" id="redeemCodeInput" required placeholder="Kode redeem..." class="flex-grow bg-slate-950/60 border border-slate-800 rounded-xl px-3 py-2 text-xs focus:outline-none focus:border-emerald-500 uppercase">
-                        <button type="submit" class="bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold px-4 py-2 rounded-xl text-xs transition-all cursor-pointer">Tukar</button>
-                    </form>
-                    <div id="redeemAlert" class="mt-3 text-xs hidden p-2 rounded-lg"></div>
-                </div>
-
-                <div class="bg-slate-900/80 border border-slate-800 rounded-2xl p-6 shadow-xl">
-                    <h3 class="text-sm font-bold text-white mb-2"><i class="fa-solid fa-paper-plane mr-2 text-cyan-400"></i>Kirim Reaksi</h3>
-                    <form id="reactForm" class="space-y-3">
-                        <input type="text" id="link" required placeholder="Link Channel WhatsApp..." class="w-full bg-slate-950/60 border border-slate-800 rounded-xl px-3 py-2 text-xs focus:outline-none focus:border-emerald-500">
-                        <input type="text" id="emoji" required placeholder="Emoji (🔥, 👍, ❤️)..." class="w-full bg-slate-950/60 border border-slate-800 rounded-xl px-3 py-2 text-xs focus:outline-none focus:border-emerald-500">
-                        <button type="submit" id="submitBtn" class="w-full bg-gradient-to-r from-emerald-500 to-cyan-500 text-slate-950 font-bold py-2 rounded-xl text-xs transition-all cursor-pointer">Kirim Reaksi (1 Koin)</button>
-                    </form>
-                    <div id="resultContainer" class="mt-3 hidden text-[11px] text-emerald-400 bg-slate-950 p-2 rounded-lg border border-slate-800">Eksekusi Berhasil!</div>
-                </div>
+        <main class="max-w-2xl w-full mx-auto px-4 py-8 flex-grow space-y-6">
+            <div class="bg-slate-900/80 border border-slate-800 rounded-2xl p-6 shadow-xl">
+                <h3 class="text-sm font-bold text-white mb-2"><i class="fa-solid fa-ticket mr-2 text-emerald-400"></i>Tukar Kode Redeem Koin</h3>
+                <p class="text-xs text-slate-400 mb-4">Masukkan kode unik dari admin untuk mendapatkan koin secara acak.</p>
+                <form id="redeemForm" class="flex gap-2">
+                    <input type="text" id="redeemCodeInput" required placeholder="Masukkan kode redeem..." class="flex-grow bg-slate-950/60 border border-slate-800 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:border-emerald-500 uppercase">
+                    <button type="submit" class="bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold px-5 py-2.5 rounded-xl text-sm transition-all cursor-pointer">Tukar</button>
+                </form>
+                <div id="redeemAlert" class="mt-3 text-xs hidden p-2 rounded-lg"></div>
             </div>
 
             <div class="bg-slate-900/80 border border-slate-800 rounded-2xl p-6 shadow-2xl">
                 <div class="flex justify-between items-center mb-4">
                     <div>
-                        <h2 class="text-base font-bold text-white flex items-center">
-                            <i class="fa-solid fa-users text-emerald-400 mr-2"></i> Ruang Chat Komunitas (Global Live)
-                        </h2>
-                        <p class="text-xs text-slate-400">Tempat kumpul seluruh pengguna dan admin secara real-time.</p>
-                    </div>
-                    <div class="flex items-center space-x-2">
-                        <span class="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-                            <span class="w-2 h-2 rounded-full bg-emerald-400 mr-1.5 animate-pulse"></span>
-                            <span>Live Vercel</span>
-                        </span>
+                        <h2 class="text-xl font-bold text-white mb-1">Kirim Reaksi WhatsApp</h2>
+                        <p class="text-sm text-slate-400">Biaya: 1 Koin per eksekusi reaksi.</p>
                     </div>
                 </div>
-
-                <div id="chatBox" class="h-80 overflow-y-auto bg-slate-950/70 border border-slate-800/80 rounded-xl p-4 space-y-3 mb-4 text-xs">
-                </div>
-
-                <form id="chatForm" class="flex gap-2">
-                    <input type="text" id="chatInput" required placeholder="Ketik pesan untuk semua orang..." class="flex-grow bg-slate-950/60 border border-slate-800 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:border-emerald-500">
-                    <button type="submit" class="bg-gradient-to-r from-emerald-500 to-cyan-500 text-slate-950 font-bold px-5 py-2.5 rounded-xl text-sm transition-all cursor-pointer flex items-center">
-                        <i class="fa-solid fa-paper-plane mr-1.5"></i> Kirim
+                <form id="reactForm" class="space-y-4">
+                    <div>
+                        <label class="block text-xs font-semibold uppercase tracking-wider text-slate-300 mb-2">Link Channel WhatsApp</label>
+                        <input type="text" id="link" required placeholder="https://whatsapp.com/channel/..." class="w-full bg-slate-950/60 border border-slate-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-emerald-500">
+                    </div>
+                    <div>
+                        <label class="block text-xs font-semibold uppercase tracking-wider text-slate-300 mb-2">Emoji Reaksi</label>
+                        <input type="text" id="emoji" required placeholder="🔥, 👍, ❤️" class="w-full bg-slate-950/60 border border-slate-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-emerald-500">
+                    </div>
+                    <button type="submit" id="submitBtn" class="w-full bg-gradient-to-r from-emerald-500 to-cyan-500 text-slate-950 font-bold py-3 rounded-xl shadow-lg transition-all cursor-pointer">
+                        Kirim Reaksi
                     </button>
                 </form>
+                <div id="resultContainer" class="mt-6 hidden">
+                    <div class="bg-slate-950/90 border border-slate-800 rounded-xl p-4 text-xs font-mono text-emerald-400">
+                        <div class="flex items-center space-x-2 text-emerald-400 font-bold mb-1">
+                            <i class="fa-solid fa-circle-check"></i>
+                            <span>Status Eksekusi Berhasil</span>
+                        </div>
+                        <p class="text-slate-400 text-[11px]">Reaksi Telah Terkirim Silakan Tunggu Beberapa Menit.</p>
+                    </div>
+                </div>
             </div>
         </main>
 
         <footer class="border-t border-slate-900 bg-slate-950/50 py-4 text-center text-xs text-slate-500">Powered by BANGGUS REACH</footer>
 
         <script>
-            const currentUsername = "${user.username}";
-            const currentRole = "${user.role}";
-            
-            const pusher = new Pusher("${PUSHER_KEY}", { cluster: 'ap1' });
-            const channel = pusher.subscribe('global-chat-channel');
-
-            const chatBox = document.getElementById('chatBox');
-            const chatForm = document.getElementById('chatForm');
-            const chatInput = document.getElementById('chatInput');
-
-            function appendMessage(msg) {
-                const isMe = msg.username === currentUsername;
-                const msgEl = document.createElement('div');
-                msgEl.className = 'flex flex-col ' + (isMe ? 'items-end' : 'items-start');
-                
-                let badge = '';
-                if(msg.role === 'admin') {
-                    badge = '<span class="bg-purple-500/20 text-purple-400 border border-purple-500/30 text-[9px] px-1.5 py-0.2 rounded font-semibold ml-1">ADMIN</span>';
-                } else if(!isMe) {
-                    badge = '<span class="bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 text-[9px] px-1.5 py-0.2 rounded font-semibold ml-1">MEMBER</span>';
-                }
-
-                msgEl.innerHTML = `
-                    <div class="flex items-center space-x-1 text-[11px] text-slate-400 mb-0.5">
-                        <span class="font-semibold \${isMe ? 'text-emerald-400' : 'text-slate-300'}">\${msg.username}</span>
-                        \${badge}
-                        <span class="text-[9px] text-slate-500 ml-1">\${msg.time}</span>
-                    </div>
-                    <div class="max-w-[85%] rounded-xl px-3.5 py-2 \${isMe ? 'bg-emerald-500/20 text-emerald-100 border border-emerald-500/30' : (msg.role === 'admin' ? 'bg-purple-900/40 text-purple-200 border border-purple-700/50' : 'bg-slate-800/80 text-slate-200 border border-slate-700/50')}">
-                        \${msg.message}
-                    </div>
-                `;
-                chatBox.appendChild(msgEl);
-                chatBox.scrollTop = chatBox.scrollHeight;
-            }
-
-            channel.bind('new_message', function(msg) {
-                appendMessage(msg);
-            });
-
-            chatForm.addEventListener('submit', async (e) => {
-                e.preventDefault();
-                const text = chatInput.value;
-                if(text.trim()) {
-                    chatInput.value = '';
-                    await fetch('/api/chat/send', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ message: text })
-                    });
-                }
-            });
-
             document.getElementById('redeemForm').addEventListener('submit', async (e) => {
                 e.preventDefault();
                 const code = document.getElementById('redeemCodeInput').value;
@@ -587,7 +640,7 @@ function renderDashboardUser(user) {
                 const outContainer = document.getElementById('resultContainer');
                 
                 btn.disabled = true; btn.textContent = 'Memproses...';
-                outContainer.classList.remove('hidden');
+                outContainer.classList.add('hidden');
                 try {
                     const res = await fetch('/api/react', {
                         method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -595,14 +648,16 @@ function renderDashboardUser(user) {
                     });
                     const data = await res.json();
                     if(data.success) {
+                        outContainer.classList.remove('hidden');
                         document.getElementById('coinDisplay').textContent = data.remainingCoins + ' Koin';
                     } else {
                         alert(data.error);
-                        outContainer.classList.add('hidden');
+                        if(data.error && data.error.includes('offline')) {
+                            window.location.reload();
+                        }
                     }
                 } catch(err) {
                     alert('Gagal: ' + err.message);
-                    outContainer.classList.add('hidden');
                 } finally {
                     btn.disabled = false; btn.textContent = 'Kirim Reaksi (1 Koin)';
                 }
@@ -613,7 +668,7 @@ function renderDashboardUser(user) {
     `;
 }
 
-function renderDashboardAdmin(user, allUsers, allCodes) {
+function renderDashboardAdmin(user, allUsers, allCodes, currentServerStatus) {
     const userRows = allUsers.map(u => `
         <tr class="border-b border-slate-800/60 hover:bg-slate-800/30">
             <td class="py-3 px-4 text-sm text-slate-200">${u.username}</td>
@@ -636,6 +691,8 @@ function renderDashboardAdmin(user, allUsers, allCodes) {
         </tr>
     `).join('') : `<tr><td colspan="4" class="py-4 text-center text-xs text-slate-500">Belum ada kode redeem aktif</td></tr>`;
 
+    const isOnline = currentServerStatus === 'online';
+
     return `
     <!DOCTYPE html>
     <html lang="id" class="dark">
@@ -643,11 +700,10 @@ function renderDashboardAdmin(user, allUsers, allCodes) {
         <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Admin Panel - BANGGUS REACH</title>
         <script src="https://cdn.tailwindcss.com"></script>
-        <script src="https://js.pusher.com/8.0.1/pusher.min.js"></script>
         <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     </head>
     <body class="bg-slate-950 text-slate-100 font-sans min-h-screen flex flex-col justify-between">
-        <header class="border-b border-slate-800 bg-slate-900/50 backdrop-blur-md sticky top-0 z-50">
+        <header class="border-b border-slate-800 bg-slate-900/50 backdrop-blur-md">
             <div class="max-w-5xl mx-auto px-6 h-16 flex items-center justify-between">
                 <div class="flex items-center space-x-3">
                     <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-purple-500 to-indigo-500 flex items-center justify-center">
@@ -673,9 +729,19 @@ function renderDashboardAdmin(user, allUsers, allCodes) {
                     <div class="text-slate-400 text-xs font-semibold uppercase tracking-wider mb-1">Total Pengguna</div>
                     <div class="text-3xl font-bold text-emerald-400">${allUsers.length}</div>
                 </div>
-                <div class="bg-slate-900/80 border border-slate-800 rounded-2xl p-5 shadow-lg">
-                    <div class="text-slate-400 text-xs font-semibold uppercase tracking-wider mb-1">Status Chat</div>
-                    <div class="text-3xl font-bold text-cyan-400 flex items-center"><span class="w-2.5 h-2.5 bg-emerald-500 rounded-full mr-2 animate-pulse"></span> Active</div>
+                <div class="bg-slate-900/80 border border-slate-800 rounded-2xl p-5 shadow-lg flex flex-col justify-between">
+                    <div>
+                        <div class="text-slate-400 text-xs font-semibold uppercase tracking-wider mb-1">Status Server</div>
+                        <div class="text-lg font-bold ${isOnline ? 'text-cyan-400' : 'text-red-400'} flex items-center mt-1">
+                            <span class="w-2 h-2 ${isOnline ? 'bg-emerald-500' : 'bg-red-500'} rounded-full mr-2 animate-pulse"></span> 
+                            <span id="serverStatusText">${isOnline ? 'Online (Aktif)' : 'Offline (Dimatikan)'}</span>
+                        </div>
+                    </div>
+                    <div class="mt-3">
+                        <button onclick="toggleServer()" id="toggleServerBtn" class="w-full text-xs font-bold py-2 rounded-xl transition-all cursor-pointer ${isOnline ? 'bg-red-500/10 text-red-400 border border-red-500/20 hover:bg-red-500/20' : 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 hover:bg-emerald-500/20'}">
+                            <i class="fa-solid fa-power-off mr-1"></i> ${isOnline ? 'Matikan Server (Offline)' : 'Nyalakan Server (Online)'}
+                        </button>
+                    </div>
                 </div>
                 <div class="bg-slate-900/80 border border-slate-800 rounded-2xl p-5 shadow-lg">
                     <div class="text-slate-400 text-xs font-semibold uppercase tracking-wider mb-1">Kode Aktif</div>
@@ -686,37 +752,32 @@ function renderDashboardAdmin(user, allUsers, allCodes) {
             <div class="bg-slate-900/80 border border-slate-800 rounded-2xl p-6 shadow-2xl">
                 <div class="flex justify-between items-center mb-4">
                     <div>
-                        <h2 class="text-base font-bold text-white flex items-center">
-                            <i class="fa-solid fa-comments text-purple-400 mr-2"></i> Ruang Chat Komunitas (Admin Room)
-                        </h2>
-                        <p class="text-xs text-slate-400">Ikut serta dalam percakapan publik secara real-time.</p>
+                        <h2 class="text-lg font-bold text-white mb-1"><i class="fa-solid fa-bolt mr-2 text-purple-400"></i>Kirim Reaksi WhatsApp (Admin)</h2>
+                        <p class="text-xs text-slate-400">Fitur kirim reaksi langsung dari panel admin tanpa biaya koin.</p>
                     </div>
                 </div>
-
-                <div id="adminChatBox" class="h-72 overflow-y-auto bg-slate-950/70 border border-slate-800/80 rounded-xl p-4 space-y-3 mb-4 text-xs">
-                </div>
-
-                <form id="adminChatForm" class="flex gap-2">
-                    <input type="text" id="adminChatInput" required placeholder="Tulis pengumuman / balasan..." class="flex-grow bg-slate-950/60 border border-slate-800 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:border-purple-500">
-                    <button type="submit" class="bg-purple-600 hover:bg-purple-500 text-white font-bold px-5 py-2.5 rounded-xl text-sm transition-all cursor-pointer flex items-center">
-                        <i class="fa-solid fa-paper-plane mr-1.5"></i> Kirim
-                    </button>
-                </form>
-            </div>
-
-            <div class="bg-slate-900/80 border border-slate-800 rounded-2xl p-6 shadow-2xl">
-                <h2 class="text-lg font-bold text-white mb-4"><i class="fa-solid fa-bolt mr-2 text-purple-400"></i>Kirim Reaksi WhatsApp (Admin)</h2>
                 <form id="adminReactForm" class="space-y-4">
                     <div>
-                        <input type="text" id="adminLink" required placeholder="Link Channel WhatsApp..." class="w-full bg-slate-950/60 border border-slate-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-purple-500">
+                        <label class="block text-xs font-semibold uppercase tracking-wider text-slate-300 mb-2">Link Channel WhatsApp</label>
+                        <input type="text" id="adminLink" required placeholder="https://whatsapp.com/channel/..." class="w-full bg-slate-950/60 border border-slate-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-purple-500">
                     </div>
                     <div>
-                        <input type="text" id="adminEmoji" required placeholder="Emoji Reaksi (🔥, 👍, ❤️)..." class="w-full bg-slate-950/60 border border-slate-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-purple-500">
+                        <label class="block text-xs font-semibold uppercase tracking-wider text-slate-300 mb-2">Emoji Reaksi</label>
+                        <input type="text" id="adminEmoji" required placeholder="🔥, 👍, ❤️" class="w-full bg-slate-950/60 border border-slate-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-purple-500">
                     </div>
                     <button type="submit" id="adminSubmitBtn" class="w-full bg-gradient-to-r from-purple-600 to-indigo-600 hover:opacity-90 text-white font-bold py-3 rounded-xl shadow-lg transition-all cursor-pointer">
-                        Kirim Reaksi (Bebas Biaya)
+                        Kirim Reaksi
                     </button>
                 </form>
+                <div id="adminResultContainer" class="mt-6 hidden">
+                    <div class="bg-slate-950/90 border border-slate-800 rounded-xl p-4 text-xs font-mono text-purple-400">
+                        <div class="flex items-center space-x-2 text-purple-400 font-bold mb-1">
+                            <i class="fa-solid fa-shield-check"></i>
+                            <span>Admin Eksekusi Reaksi Berhasil</span>
+                        </div>
+                        <p class="text-slate-400 text-[11px]">reaksi telah terkirim silakan tunggu beberapa menit.</p>
+                    </div>
+                </div>
             </div>
 
             <div class="bg-slate-900/80 border border-slate-800 rounded-2xl p-6 shadow-xl">
@@ -746,6 +807,23 @@ function renderDashboardAdmin(user, allUsers, allCodes) {
             </div>
 
             <div class="bg-slate-900/80 border border-slate-800 rounded-2xl p-6 shadow-xl">
+                <h2 class="text-lg font-bold text-white mb-4"><i class="fa-solid fa-list mr-2 text-cyan-400"></i>Daftar Kode Redeem Aktif</h2>
+                <div class="overflow-x-auto">
+                    <table class="w-full text-left border-collapse">
+                        <thead>
+                            <tr class="border-b border-slate-800 text-xs font-semibold uppercase text-slate-400">
+                                <th class="py-3 px-4">Kode</th>
+                                <th class="py-3 px-4">Rentang Koin Acak</th>
+                                <th class="py-3 px-4">Sisa Kuota</th>
+                                <th class="py-3 px-4 text-right">Aksi Hapus</th>
+                            </tr>
+                        </thead>
+                        <tbody>${codeRows}</tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div class="bg-slate-900/80 border border-slate-800 rounded-2xl p-6 shadow-xl">
                 <h2 class="text-lg font-bold text-white mb-4"><i class="fa-solid fa-users mr-2 text-purple-400"></i>Daftar Akun Terdaftar</h2>
                 <div class="overflow-x-auto">
                     <table class="w-full text-left border-collapse">
@@ -766,58 +844,21 @@ function renderDashboardAdmin(user, allUsers, allCodes) {
         <footer class="border-t border-slate-900 bg-slate-950/50 py-4 text-center text-xs text-slate-500">Powered by BANGGUS REACH</footer>
 
         <script>
-            const currentUsername = "${user.username}";
-            const currentRole = "${user.role}";
-            
-            const pusher = new Pusher("${PUSHER_KEY}", { cluster: 'ap1' });
-            const channel = pusher.subscribe('global-chat-channel');
-
-            const adminChatBox = document.getElementById('adminChatBox');
-            const adminChatForm = document.getElementById('adminChatForm');
-            const adminChatInput = document.getElementById('adminChatInput');
-
-            function appendAdminMessage(msg) {
-                const isMe = msg.username === currentUsername;
-                const msgEl = document.createElement('div');
-                msgEl.className = 'flex flex-col ' + (isMe ? 'items-end' : 'items-start');
-                
-                let badge = '';
-                if(msg.role === 'admin') {
-                    badge = '<span class="bg-purple-500/20 text-purple-400 border border-purple-500/30 text-[9px] px-1.5 py-0.2 rounded font-semibold ml-1">ADMIN</span>';
-                } else {
-                    badge = '<span class="bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 text-[9px] px-1.5 py-0.2 rounded font-semibold ml-1">MEMBER</span>';
-                }
-
-                msgEl.innerHTML = `
-                    <div class="flex items-center space-x-1 text-[11px] text-slate-400 mb-0.5">
-                        <span class="font-semibold \${isMe ? 'text-purple-400' : 'text-slate-300'}">\${msg.username}</span>
-                        \${badge}
-                        <span class="text-[9px] text-slate-500 ml-1">\${msg.time}</span>
-                    </div>
-                    <div class="max-w-[85%] rounded-xl px-3.5 py-2 \${isMe ? 'bg-purple-600/20 text-purple-100 border border-purple-500/30' : 'bg-slate-800/80 text-slate-200 border border-slate-700/50'}">
-                        \${msg.message}
-                    </div>
-                `;
-                adminChatBox.appendChild(msgEl);
-                adminChatBox.scrollTop = adminChatBox.scrollHeight;
-            }
-
-            channel.bind('new_message', function(msg) {
-                appendAdminMessage(msg);
-            });
-
-            adminChatForm.addEventListener('submit', async (e) => {
-                e.preventDefault();
-                const text = adminChatInput.value;
-                if(text.trim()) {
-                    adminChatInput.value = '';
-                    await fetch('/api/chat/send', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ message: text })
+            async function toggleServer() {
+                try {
+                    const res = await fetch('/api/admin/toggle-server', {
+                        method: 'POST', headers: {'Content-Type': 'application/json'}
                     });
+                    const data = await res.json();
+                    if(data.success) {
+                        window.location.reload();
+                    } else {
+                        alert(data.error);
+                    }
+                } catch(e) {
+                    alert('Gagal mengubah status server');
                 }
-            });
+            }
 
             async function deleteCode(code) {
                 if(!confirm('Yakin ingin menghapus kode redeem ' + code + '?')) return;
@@ -870,8 +911,10 @@ function renderDashboardAdmin(user, allUsers, allCodes) {
                 const link = document.getElementById('adminLink').value;
                 const emoji = document.getElementById('adminEmoji').value;
                 const btn = document.getElementById('adminSubmitBtn');
+                const outContainer = document.getElementById('adminResultContainer');
                 
                 btn.disabled = true; btn.textContent = 'Memproses...';
+                outContainer.classList.add('hidden');
                 try {
                     const res = await fetch('/api/react', {
                         method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -879,7 +922,8 @@ function renderDashboardAdmin(user, allUsers, allCodes) {
                     });
                     const data = await res.json();
                     if(data.success) {
-                        alert('Reaksi Berhasil Dikirim!');
+                        outContainer.classList.remove('hidden');
+                        document.getElementById('adminCoinDisplay').textContent = data.remainingCoins + ' Koin (Admin)';
                     } else {
                         alert(data.error);
                     }
@@ -895,11 +939,5 @@ function renderDashboardAdmin(user, allUsers, allCodes) {
     `;
 }
 
-// Support Serverless Function Deployment
-if (process.env.NODE_ENV !== 'production') {
-    app.listen(PORT, () => {
-        console.log(`Server running on port ${PORT}`);
-    });
-}
-
+// WAJIB UNTUK VERCEL SERVERLESS
 module.exports = app;
