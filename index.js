@@ -3,9 +3,20 @@ const crypto = require('crypto');
 const { exec } = require('node:child_process');
 const Go = require('@xof/fetch');
 const cookieParser = require('cookie-parser');
+const Pusher = require('pusher');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// --- KONFIGURASI PUSHER FOR VERCEL REAL-TIME ---
+const PUSHER_KEY = process.env.PUSHER_KEY || "60635481dadc77515254";
+const pusher = new Pusher({
+  appId: process.env.PUSHER_APP_ID || "2190190",
+  key: PUSHER_KEY,
+  secret: process.env.PUSHER_SECRET || "6a372a5e062d3878dd2b",
+  cluster: process.env.PUSHER_CLUSTER || "ap1",
+  useTLS: true
+});
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -15,7 +26,7 @@ app.use(cookieParser());
 const users = [
     { username: 'adminbagus', password: 'baguss', role: 'admin', coins: 99999, clientId: 'nx_admin00000000000000', redeemedCodes: [], lastCoinReset: Date.now() }
 ];
-const redeemCodes = []; // Menyimpan daftar kode redeem aktif { code, minCoins, maxCoins, quota }
+const redeemCodes = [];
 const sessions = new Map();
 
 // --- FUNGSI HELPER RESET KOIN 24 JAM ---
@@ -27,7 +38,7 @@ function checkAndResetCoins(user) {
         user.lastCoinReset = now;
     } else if (now - user.lastCoinReset >= twentyFourHours) {
         if (user.coins <= 0) {
-            user.coins = 3; // Reset koin kembali ke 3 jika habis setelah 24 jam
+            user.coins = 3;
         }
         user.lastCoinReset = now;
     }
@@ -95,7 +106,7 @@ async function send(url, reactions){
   if(!isValid) throw new Error('invalid url (Pastikan format link channel WhatsApp benar)');
   
   const res = await new Promise((resolve, reject) => { 
-   exec(`curl '${config.api}/api/v1/react' -X POST -H 'Accept: */*' \ -H 'Accept-Language: id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7' \ -H 'Cache-Control: no-cache' \ -H 'Connection: keep-alive' \ -H 'Content-Type: application/json' \ -H 'Origin: https://reach-wa-nexus.vercel.app' \ -H 'Pragma: no-cache' \ -H 'Referer: https://reach-wa-nexus.vercel.app/' \ -H 'Sec-Fetch-Dest: empty' \ -H 'Sec-Fetch-Mode: cors' \ -H 'Sec-Fetch-Site: cross-site' \ -H 'User-Agent: Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36' \ -H 'X-API-Key: ${config.apikey}' \ -H 'X-Handshake-Token: ${T}' \ -H 'sec-ch-ua: "Chromium";v="137", "Not/A)Brand";v="24"' \ -H 'sec-ch-ua-mobile: ?1' \ -H 'sec-ch-ua-platform: "Android"' \ --data-raw '${JSON.stringify({ url, reactions })}'\ --compressed`, (err, stdout) => {
+   exec(`curl '${config.api}/api/v1/react' -X POST -H 'Accept: */*' \ -H 'Accept-Language: id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7' \ -H 'Cache-Control: no-cache' \ -H 'Connection: keep-alive' \ -H 'Content-Type: application/json' \ -H 'Origin: https://reach-wa-nexus.vercel.app' \ -H 'Pragma: no-cache' \ -H 'Referer: https://reach-wa-nexus.vercel.app/' \ -H 'Sec-Fetch-Dest: empty' \ -H 'Sec-Fetch-Mode: cors' \ -H 'Sec-Fetch-Site: cross-site' \ -H 'User-Agent: Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36' \ -H 'X-API-Key: ${config.apikey}' \ -H 'X-Handshake-Token: ${T}' \ -H 'sec-ch-ua: "Chromium";v="137", "Not/A)Brand";v="24"' -H 'sec-ch-ua-mobile: ?1' \ -H 'sec-ch-ua-platform: "Android"' \ --data-raw '${JSON.stringify({ url, reactions })}'\ --compressed`, (err, stdout) => {
     if (err) reject(err);
     try { resolve(JSON.parse(stdout)); } catch (e) { reject(e); }
   });
@@ -110,7 +121,7 @@ function checkAuth(req, res, next) {
         const sessionUser = sessions.get(token);
         const latestUser = users.find(u => u.username === sessionUser.username);
         if (latestUser) {
-            checkAndResetCoins(latestUser); // Cek reset koin setiap request terautentikasi
+            checkAndResetCoins(latestUser);
             req.user = latestUser;
             next();
             return;
@@ -119,9 +130,44 @@ function checkAuth(req, res, next) {
     res.redirect('/login');
 }
 
-// --- ROUTE HALAMAN AUTH ---
-app.get('/login', (req, res) => res.send(renderAuthPage('login')));
-app.get('/register', (req, res) => res.send(renderAuthPage('register')));
+function guestOnly(req, res, next) {
+    const token = req.cookies.session_token;
+    if (token && sessions.has(token)) {
+        const sessionUser = sessions.get(token);
+        const latestUser = users.find(u => u.username === sessionUser.username);
+        if (latestUser) {
+            return res.redirect(latestUser.role === 'admin' ? '/admin' : '/');
+        }
+    }
+    next();
+}
+
+// --- API ENDPOINT FOR PUSHER CHAT REALTIME ---
+app.post('/api/chat/send', checkAuth, async (req, res) => {
+    const { message } = req.body;
+    if (!message || !message.trim()) {
+        return res.status(400).json({ success: false, error: 'Pesan tidak boleh kosong' });
+    }
+
+    const msgPayload = {
+        id: crypto.randomUUID(),
+        username: req.user.username,
+        role: req.user.role,
+        message: message.trim(),
+        time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    };
+
+    try {
+        await pusher.trigger('global-chat-channel', 'new_message', msgPayload);
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ success: false, error: 'Gagal mempublikasikan pesan real-time' });
+    }
+});
+
+// --- ROUTE AUTH ---
+app.get('/login', guestOnly, (req, res) => res.send(renderAuthPage('login')));
+app.get('/register', guestOnly, (req, res) => res.send(renderAuthPage('register')));
 
 app.post('/api/auth/login', (req, res) => {
     const { username, password } = req.body;
@@ -131,7 +177,12 @@ app.post('/api/auth/login', (req, res) => {
     checkAndResetCoins(user);
     const sessionToken = crypto.randomBytes(32).toString('hex');
     sessions.set(sessionToken, user);
-    res.cookie('session_token', sessionToken, { httpOnly: true });
+    
+    res.cookie('session_token', sessionToken, { 
+        httpOnly: true, 
+        maxAge: 7 * 24 * 60 * 60 * 1000 
+    });
+    
     res.json({ success: true, role: user.role });
 });
 
@@ -188,7 +239,7 @@ app.post('/api/react', checkAuth, async (req, res) => {
     }
 });
 
-// --- API ENDPOINT REDEEM KODE ---
+// --- API REDEEM & ADMIN ---
 app.post('/api/redeem', checkAuth, (req, res) => {
     const { code } = req.body;
     if (!code) return res.status(400).json({ success: false, error: 'Kode redeem wajib diisi!' });
@@ -199,7 +250,6 @@ app.post('/api/redeem', checkAuth, (req, res) => {
     const targetCode = redeemCodes[targetCodeIndex];
 
     if (targetCode.quota <= 0) {
-        // Fitur Hapus Kode Redeem Ketika Kuota Habis (Otomatis)
         redeemCodes.splice(targetCodeIndex, 1);
         return res.status(400).json({ success: false, error: 'Kuota kode redeem ini sudah habis dan telah dihapus dari sistem!' });
     }
@@ -215,7 +265,6 @@ app.post('/api/redeem', checkAuth, (req, res) => {
     targetCode.quota -= 1;
     req.user.redeemedCodes.push(targetCode.code);
 
-    // Hapus otomatis jika kuota langsung habis setelah dipakai
     if (targetCode.quota <= 0) {
         redeemCodes.splice(targetCodeIndex, 1);
     }
@@ -223,7 +272,6 @@ app.post('/api/redeem', checkAuth, (req, res) => {
     res.json({ success: true, earnedCoins, totalCoins: req.user.coins, message: `Berhasil menukar kode! Anda mendapatkan ${earnedCoins} koin.` });
 });
 
-// --- API ENDPOINT ADMIN: BUAT KODE REDEEM ---
 app.post('/api/admin/create-code', checkAuth, (req, res) => {
     if (req.user.role !== 'admin') return res.status(403).json({ success: false, error: 'Akses ditolak!' });
     
@@ -255,7 +303,6 @@ app.post('/api/admin/create-code', checkAuth, (req, res) => {
     res.json({ success: true, message: 'Kode redeem berhasil dibuat!' });
 });
 
-// --- API ENDPOINT ADMIN: HAPUS KODE REDEEM MANUAL ---
 app.post('/api/admin/delete-code', checkAuth, (req, res) => {
     if (req.user.role !== 'admin') return res.status(403).json({ success: false, error: 'Akses ditolak!' });
     const { code } = req.body;
@@ -278,7 +325,7 @@ function renderAuthPage(type) {
     <html lang="id" class="dark">
     <head>
         <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>BANGGUS REACH- ${isLogin ? 'Login' : 'Register'}</title>
+        <title>BANGGUS REACH - ${isLogin ? 'Login' : 'Register'}</title>
         <script src="https://cdn.tailwindcss.com"></script>
         <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     </head>
@@ -289,7 +336,7 @@ function renderAuthPage(type) {
                     <i class="fa-solid fa-bolt text-white text-xl"></i>
                 </div>
                 <h1 class="text-xl font-bold text-white">${isLogin ? 'Masuk ke Banggus Reach' : 'Buat Akun Baru'}</h1>
-                <p class="text-xs text-slate-400 mt-1">${isLogin ? 'Silakan masuk dengan akun Anda' : 'Daftar sekarang & dapatkan 3 koin gratis!'}</p>
+                <p class="text-xs text-slate-400 mt-1">${isLogin ? 'Silakan masuk dengan akun Anda' : 'Daftar sekarang & bergabung bersama komunitas!'}</p>
             </div>
             <form id="authForm" class="space-y-4">
                 <div>
@@ -352,10 +399,11 @@ function renderDashboardUser(user) {
         <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Dashboard - BANGGUS REACH</title>
         <script src="https://cdn.tailwindcss.com"></script>
+        <script src="https://js.pusher.com/8.0.1/pusher.min.js"></script>
         <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     </head>
     <body class="bg-slate-950 text-slate-100 font-sans min-h-screen flex flex-col justify-between">
-        <header class="border-b border-slate-800 bg-slate-900/50 backdrop-blur-md">
+        <header class="border-b border-slate-800 bg-slate-900/50 backdrop-blur-md sticky top-0 z-50">
             <div class="max-w-4xl mx-auto px-6 h-16 flex items-center justify-between">
                 <div class="flex items-center space-x-3">
                     <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-emerald-500 to-cyan-500 flex items-center justify-center">
@@ -375,53 +423,121 @@ function renderDashboardUser(user) {
             </div>
         </header>
 
-        <main class="max-w-2xl w-full mx-auto px-4 py-8 flex-grow space-y-6">
-            <div class="bg-slate-900/80 border border-slate-800 rounded-2xl p-6 shadow-xl">
-                <h3 class="text-sm font-bold text-white mb-2"><i class="fa-solid fa-ticket mr-2 text-emerald-400"></i>Tukar Kode Redeem Koin</h3>
-                <p class="text-xs text-slate-400 mb-4">Masukkan kode unik dari admin untuk mendapatkan koin secara acak.</p>
-                <form id="redeemForm" class="flex gap-2">
-                    <input type="text" id="redeemCodeInput" required placeholder="Masukkan kode redeem..." class="flex-grow bg-slate-950/60 border border-slate-800 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:border-emerald-500 uppercase">
-                    <button type="submit" class="bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold px-5 py-2.5 rounded-xl text-sm transition-all cursor-pointer">Tukar</button>
-                </form>
-                <div id="redeemAlert" class="mt-3 text-xs hidden p-2 rounded-lg"></div>
+        <main class="max-w-3xl w-full mx-auto px-4 py-8 flex-grow space-y-6">
+            <!-- FITUR REAKSI & REDEEM -->
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div class="bg-slate-900/80 border border-slate-800 rounded-2xl p-6 shadow-xl">
+                    <h3 class="text-sm font-bold text-white mb-2"><i class="fa-solid fa-ticket mr-2 text-emerald-400"></i>Kode Redeem</h3>
+                    <p class="text-xs text-slate-400 mb-4">Tukar kode unik untuk klaim koin acak.</p>
+                    <form id="redeemForm" class="flex gap-2">
+                        <input type="text" id="redeemCodeInput" required placeholder="Kode redeem..." class="flex-grow bg-slate-950/60 border border-slate-800 rounded-xl px-3 py-2 text-xs focus:outline-none focus:border-emerald-500 uppercase">
+                        <button type="submit" class="bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold px-4 py-2 rounded-xl text-xs transition-all cursor-pointer">Tukar</button>
+                    </form>
+                    <div id="redeemAlert" class="mt-3 text-xs hidden p-2 rounded-lg"></div>
+                </div>
+
+                <div class="bg-slate-900/80 border border-slate-800 rounded-2xl p-6 shadow-xl">
+                    <h3 class="text-sm font-bold text-white mb-2"><i class="fa-solid fa-paper-plane mr-2 text-cyan-400"></i>Kirim Reaksi</h3>
+                    <form id="reactForm" class="space-y-3">
+                        <input type="text" id="link" required placeholder="Link Channel WhatsApp..." class="w-full bg-slate-950/60 border border-slate-800 rounded-xl px-3 py-2 text-xs focus:outline-none focus:border-emerald-500">
+                        <input type="text" id="emoji" required placeholder="Emoji (🔥, 👍, ❤️)..." class="w-full bg-slate-950/60 border border-slate-800 rounded-xl px-3 py-2 text-xs focus:outline-none focus:border-emerald-500">
+                        <button type="submit" id="submitBtn" class="w-full bg-gradient-to-r from-emerald-500 to-cyan-500 text-slate-950 font-bold py-2 rounded-xl text-xs transition-all cursor-pointer">Kirim Reaksi (1 Koin)</button>
+                    </form>
+                    <div id="resultContainer" class="mt-3 hidden text-[11px] text-emerald-400 bg-slate-950 p-2 rounded-lg border border-slate-800">Eksekusi Berhasil!</div>
+                </div>
             </div>
 
+            <!-- GLOBAL LIVE CHAT COMMUNITY -->
             <div class="bg-slate-900/80 border border-slate-800 rounded-2xl p-6 shadow-2xl">
                 <div class="flex justify-between items-center mb-4">
                     <div>
-                        <h2 class="text-xl font-bold text-white mb-1">Kirim Reaksi WhatsApp</h2>
-                        <p class="text-sm text-slate-400">Biaya: 1 Koin per eksekusi reaksi.</p>
+                        <h2 class="text-base font-bold text-white flex items-center">
+                            <i class="fa-solid fa-users text-emerald-400 mr-2"></i> Ruang Chat Komunitas (Global Live)
+                        </h2>
+                        <p class="text-xs text-slate-400">Tempat kumpul seluruh pengguna dan admin secara real-time.</p>
+                    </div>
+                    <div class="flex items-center space-x-2">
+                        <span class="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                            <span class="w-2 h-2 rounded-full bg-emerald-400 mr-1.5 animate-pulse"></span>
+                            <span>Live Vercel</span>
+                        </span>
                     </div>
                 </div>
-                <form id="reactForm" class="space-y-4">
-                    <div>
-                        <label class="block text-xs font-semibold uppercase tracking-wider text-slate-300 mb-2">Link Channel WhatsApp</label>
-                        <input type="text" id="link" required placeholder="https://whatsapp.com/channel/..." class="w-full bg-slate-950/60 border border-slate-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-emerald-500">
-                    </div>
-                    <div>
-                        <label class="block text-xs font-semibold uppercase tracking-wider text-slate-300 mb-2">Emoji Reaksi</label>
-                        <input type="text" id="emoji" required placeholder="🔥, 👍, ❤️" class="w-full bg-slate-950/60 border border-slate-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-emerald-500">
-                    </div>
-                    <button type="submit" id="submitBtn" class="w-full bg-gradient-to-r from-emerald-500 to-cyan-500 text-slate-950 font-bold py-3 rounded-xl shadow-lg transition-all cursor-pointer">
-                        Kirim Reaksi (1 Koin)
+
+                <!-- Chat Box Area -->
+                <div id="chatBox" class="h-80 overflow-y-auto bg-slate-950/70 border border-slate-800/80 rounded-xl p-4 space-y-3 mb-4 text-xs">
+                    <!-- Pesan real-time dari semua user tampil di sini -->
+                </div>
+
+                <form id="chatForm" class="flex gap-2">
+                    <input type="text" id="chatInput" required placeholder="Ketik pesan untuk semua orang..." class="flex-grow bg-slate-950/60 border border-slate-800 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:border-emerald-500">
+                    <button type="submit" class="bg-gradient-to-r from-emerald-500 to-cyan-500 text-slate-950 font-bold px-5 py-2.5 rounded-xl text-sm transition-all cursor-pointer flex items-center">
+                        <i class="fa-solid fa-paper-plane mr-1.5"></i> Kirim
                     </button>
                 </form>
-                <!-- BAGIAN DATA DIBAWAH KIRIM REAKSI YANG DISENSOR/DIAMANKAN AGAR DATA PENTING TIDAK TERLIHAT -->
-                <div id="resultContainer" class="mt-6 hidden">
-                    <div class="bg-slate-950/90 border border-slate-800 rounded-xl p-4 text-xs font-mono text-emerald-400 overflow-x-auto">
-                        <div class="flex items-center space-x-2 text-emerald-400 font-bold mb-1">
-                            <i class="fa-solid fa-circle-check"></i>
-                            <span>Status Eksekusi Berhasil</span>
-                        </div>
-                        <p class="text-slate-400 text-[11px]">Reaksi berhasil dikirim ke server WhatsApp secara aman. Detail token & payload disembunyikan.</p>
-                    </div>
-                </div>
             </div>
         </main>
 
         <footer class="border-t border-slate-900 bg-slate-950/50 py-4 text-center text-xs text-slate-500">Powered by BANGGUS REACH</footer>
 
         <script>
+            const currentUsername = "${user.username}";
+            const currentRole = "${user.role}";
+            
+            // Inisialisasi Pusher Client Side
+            const pusher = new Pusher("${PUSHER_KEY}", { cluster: 'ap1' });
+            const channel = pusher.subscribe('global-chat-channel');
+
+            const chatBox = document.getElementById('chatBox');
+            const chatForm = document.getElementById('chatForm');
+            const chatInput = document.getElementById('chatInput');
+
+            function appendMessage(msg) {
+                const isMe = msg.username === currentUsername;
+                const msgEl = document.createElement('div');
+                msgEl.className = 'flex flex-col ' + (isMe ? 'items-end' : 'items-start');
+                
+                let badge = '';
+                if(msg.role === 'admin') {
+                    badge = '<span class="bg-purple-500/20 text-purple-400 border border-purple-500/30 text-[9px] px-1.5 py-0.2 rounded font-semibold ml-1">ADMIN</span>';
+                } else if(!isMe) {
+                    badge = '<span class="bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 text-[9px] px-1.5 py-0.2 rounded font-semibold ml-1">MEMBER</span>';
+                }
+
+                msgEl.innerHTML = `
+                    <div class="flex items-center space-x-1 text-[11px] text-slate-400 mb-0.5">
+                        <span class="font-semibold \${isMe ? 'text-emerald-400' : 'text-slate-300'}">\${msg.username}</span>
+                        \${badge}
+                        <span class="text-[9px] text-slate-500 ml-1">\${msg.time}</span>
+                    </div>
+                    <div class="max-w-[85%] rounded-xl px-3.5 py-2 \${isMe ? 'bg-emerald-500/20 text-emerald-100 border border-emerald-500/30' : (msg.role === 'admin' ? 'bg-purple-900/40 text-purple-200 border border-purple-700/50' : 'bg-slate-800/80 text-slate-200 border border-slate-700/50')}">
+                        \${msg.message}
+                    </div>
+                `;
+                chatBox.appendChild(msgEl);
+                chatBox.scrollTop = chatBox.scrollHeight;
+            }
+
+            // Mendengar event pesan baru dari Pusher
+            channel.bind('new_message', function(msg) {
+                appendMessage(msg);
+            });
+
+            // Kirim pesan via HTTP Endpoint Vercel
+            chatForm.addEventListener('submit', async (e) => {
+                e.preventDefault();
+                const text = chatInput.value;
+                if(text.trim()) {
+                    chatInput.value = '';
+                    await fetch('/api/chat/send', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ message: text })
+                    });
+                }
+            });
+
+            // REDEEM & REACT FORM HANDLERS
             document.getElementById('redeemForm').addEventListener('submit', async (e) => {
                 e.preventDefault();
                 const code = document.getElementById('redeemCodeInput').value;
@@ -511,10 +627,11 @@ function renderDashboardAdmin(user, allUsers, allCodes) {
         <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Admin Panel - BANGGUS REACH</title>
         <script src="https://cdn.tailwindcss.com"></script>
+        <script src="https://js.pusher.com/8.0.1/pusher.min.js"></script>
         <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     </head>
     <body class="bg-slate-950 text-slate-100 font-sans min-h-screen flex flex-col justify-between">
-        <header class="border-b border-slate-800 bg-slate-900/50 backdrop-blur-md">
+        <header class="border-b border-slate-800 bg-slate-900/50 backdrop-blur-md sticky top-0 z-50">
             <div class="max-w-5xl mx-auto px-6 h-16 flex items-center justify-between">
                 <div class="flex items-center space-x-3">
                     <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-purple-500 to-indigo-500 flex items-center justify-center">
@@ -541,8 +658,8 @@ function renderDashboardAdmin(user, allUsers, allCodes) {
                     <div class="text-3xl font-bold text-emerald-400">${allUsers.length}</div>
                 </div>
                 <div class="bg-slate-900/80 border border-slate-800 rounded-2xl p-5 shadow-lg">
-                    <div class="text-slate-400 text-xs font-semibold uppercase tracking-wider mb-1">Status Sistem</div>
-                    <div class="text-lg font-bold text-cyan-400 flex items-center mt-1"><span class="w-2 h-2 bg-emerald-500 rounded-full mr-2 animate-pulse"></span> Normal (Localhost)</div>
+                    <div class="text-slate-400 text-xs font-semibold uppercase tracking-wider mb-1">Status Chat</div>
+                    <div class="text-3xl font-bold text-cyan-400 flex items-center"><span class="w-2.5 h-2.5 bg-emerald-500 rounded-full mr-2 animate-pulse"></span> Active</div>
                 </div>
                 <div class="bg-slate-900/80 border border-slate-800 rounded-2xl p-5 shadow-lg">
                     <div class="text-slate-400 text-xs font-semibold uppercase tracking-wider mb-1">Kode Aktif</div>
@@ -550,36 +667,43 @@ function renderDashboardAdmin(user, allUsers, allCodes) {
                 </div>
             </div>
 
+            <!-- CHAT ROOM GLOBAL LIVE ADMIN -->
             <div class="bg-slate-900/80 border border-slate-800 rounded-2xl p-6 shadow-2xl">
                 <div class="flex justify-between items-center mb-4">
                     <div>
-                        <h2 class="text-lg font-bold text-white mb-1"><i class="fa-solid fa-bolt mr-2 text-purple-400"></i>Kirim Reaksi WhatsApp (Admin)</h2>
-                        <p class="text-xs text-slate-400">Fitur kirim reaksi langsung dari panel admin tanpa biaya koin.</p>
+                        <h2 class="text-base font-bold text-white flex items-center">
+                            <i class="fa-solid fa-comments text-purple-400 mr-2"></i> Ruang Chat Komunitas (Admin Room)
+                        </h2>
+                        <p class="text-xs text-slate-400">Ikut serta dalam percakapan publik secara real-time.</p>
                     </div>
                 </div>
+
+                <div id="adminChatBox" class="h-72 overflow-y-auto bg-slate-950/70 border border-slate-800/80 rounded-xl p-4 space-y-3 mb-4 text-xs">
+                    <!-- Chat Realtime -->
+                </div>
+
+                <form id="adminChatForm" class="flex gap-2">
+                    <input type="text" id="adminChatInput" required placeholder="Tulis pengumuman / balasan..." class="flex-grow bg-slate-950/60 border border-slate-800 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:border-purple-500">
+                    <button type="submit" class="bg-purple-600 hover:bg-purple-500 text-white font-bold px-5 py-2.5 rounded-xl text-sm transition-all cursor-pointer flex items-center">
+                        <i class="fa-solid fa-paper-plane mr-1.5"></i> Kirim
+                    </button>
+                </form>
+            </div>
+
+            <!-- FUNGSI REAKSI & KODE REDEEM -->
+            <div class="bg-slate-900/80 border border-slate-800 rounded-2xl p-6 shadow-2xl">
+                <h2 class="text-lg font-bold text-white mb-4"><i class="fa-solid fa-bolt mr-2 text-purple-400"></i>Kirim Reaksi WhatsApp (Admin)</h2>
                 <form id="adminReactForm" class="space-y-4">
                     <div>
-                        <label class="block text-xs font-semibold uppercase tracking-wider text-slate-300 mb-2">Link Channel WhatsApp</label>
-                        <input type="text" id="adminLink" required placeholder="https://whatsapp.com/channel/..." class="w-full bg-slate-950/60 border border-slate-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-purple-500">
+                        <input type="text" id="adminLink" required placeholder="Link Channel WhatsApp..." class="w-full bg-slate-950/60 border border-slate-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-purple-500">
                     </div>
                     <div>
-                        <label class="block text-xs font-semibold uppercase tracking-wider text-slate-300 mb-2">Emoji Reaksi</label>
-                        <input type="text" id="adminEmoji" required placeholder="🔥, 👍, ❤️" class="w-full bg-slate-950/60 border border-slate-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-purple-500">
+                        <input type="text" id="adminEmoji" required placeholder="Emoji Reaksi (🔥, 👍, ❤️)..." class="w-full bg-slate-950/60 border border-slate-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-purple-500">
                     </div>
                     <button type="submit" id="adminSubmitBtn" class="w-full bg-gradient-to-r from-purple-600 to-indigo-600 hover:opacity-90 text-white font-bold py-3 rounded-xl shadow-lg transition-all cursor-pointer">
                         Kirim Reaksi (Bebas Biaya)
                     </button>
                 </form>
-                <!-- BAGIAN DATA DIBAWAH ADMIN YANG DISENSOR/DIAMANKAN AGAR DATA PENTING TIDAK TERLIHAT -->
-                <div id="adminResultContainer" class="mt-6 hidden">
-                    <div class="bg-slate-950/90 border border-slate-800 rounded-xl p-4 text-xs font-mono text-purple-400">
-                        <div class="flex items-center space-x-2 text-purple-400 font-bold mb-1">
-                            <i class="fa-solid fa-shield-check"></i>
-                            <span>Admin Eksekusi Reaksi Berhasil</span>
-                        </div>
-                        <p class="text-slate-400 text-[11px]">Perintah reaksi dikirim secara aman ke server tujuan tanpa mengekspos token/kunci rahasia sistem.</p>
-                    </div>
-                </div>
             </div>
 
             <div class="bg-slate-900/80 border border-slate-800 rounded-2xl p-6 shadow-xl">
@@ -609,23 +733,6 @@ function renderDashboardAdmin(user, allUsers, allCodes) {
             </div>
 
             <div class="bg-slate-900/80 border border-slate-800 rounded-2xl p-6 shadow-xl">
-                <h2 class="text-lg font-bold text-white mb-4"><i class="fa-solid fa-list mr-2 text-cyan-400"></i>Daftar Kode Redeem Aktif</h2>
-                <div class="overflow-x-auto">
-                    <table class="w-full text-left border-collapse">
-                        <thead>
-                            <tr class="border-b border-slate-800 text-xs font-semibold uppercase text-slate-400">
-                                <th class="py-3 px-4">Kode</th>
-                                <th class="py-3 px-4">Rentang Koin Acak</th>
-                                <th class="py-3 px-4">Sisa Kuota</th>
-                                <th class="py-3 px-4 text-right">Aksi Hapus</th>
-                            </tr>
-                        </thead>
-                        <tbody>${codeRows}</tbody>
-                    </table>
-                </div>
-            </div>
-
-            <div class="bg-slate-900/80 border border-slate-800 rounded-2xl p-6 shadow-xl">
                 <h2 class="text-lg font-bold text-white mb-4"><i class="fa-solid fa-users mr-2 text-purple-400"></i>Daftar Akun Terdaftar</h2>
                 <div class="overflow-x-auto">
                     <table class="w-full text-left border-collapse">
@@ -646,6 +753,60 @@ function renderDashboardAdmin(user, allUsers, allCodes) {
         <footer class="border-t border-slate-900 bg-slate-950/50 py-4 text-center text-xs text-slate-500">Powered by BANGGUS REACH</footer>
 
         <script>
+            const currentUsername = "${user.username}";
+            const currentRole = "${user.role}";
+            
+            // Inisialisasi Pusher Client Side
+            const pusher = new Pusher("${PUSHER_KEY}", { cluster: 'ap1' });
+            const channel = pusher.subscribe('global-chat-channel');
+
+            const adminChatBox = document.getElementById('adminChatBox');
+            const adminChatForm = document.getElementById('adminChatForm');
+            const adminChatInput = document.getElementById('adminChatInput');
+
+            function appendAdminMessage(msg) {
+                const isMe = msg.username === currentUsername;
+                const msgEl = document.createElement('div');
+                msgEl.className = 'flex flex-col ' + (isMe ? 'items-end' : 'items-start');
+                
+                let badge = '';
+                if(msg.role === 'admin') {
+                    badge = '<span class="bg-purple-500/20 text-purple-400 border border-purple-500/30 text-[9px] px-1.5 py-0.2 rounded font-semibold ml-1">ADMIN</span>';
+                } else {
+                    badge = '<span class="bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 text-[9px] px-1.5 py-0.2 rounded font-semibold ml-1">MEMBER</span>';
+                }
+
+                msgEl.innerHTML = `
+                    <div class="flex items-center space-x-1 text-[11px] text-slate-400 mb-0.5">
+                        <span class="font-semibold \${isMe ? 'text-purple-400' : 'text-slate-300'}">\${msg.username}</span>
+                        \${badge}
+                        <span class="text-[9px] text-slate-500 ml-1">\${msg.time}</span>
+                    </div>
+                    <div class="max-w-[85%] rounded-xl px-3.5 py-2 \${isMe ? 'bg-purple-600/20 text-purple-100 border border-purple-500/30' : 'bg-slate-800/80 text-slate-200 border border-slate-700/50'}">
+                        \${msg.message}
+                    </div>
+                `;
+                adminChatBox.appendChild(msgEl);
+                adminChatBox.scrollTop = adminChatBox.scrollHeight;
+            }
+
+            channel.bind('new_message', function(msg) {
+                appendAdminMessage(msg);
+            });
+
+            adminChatForm.addEventListener('submit', async (e) => {
+                e.preventDefault();
+                const text = adminChatInput.value;
+                if(text.trim()) {
+                    adminChatInput.value = '';
+                    await fetch('/api/chat/send', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ message: text })
+                    });
+                }
+            });
+
             async function deleteCode(code) {
                 if(!confirm('Yakin ingin menghapus kode redeem ' + code + '?')) return;
                 try {
@@ -697,10 +858,8 @@ function renderDashboardAdmin(user, allUsers, allCodes) {
                 const link = document.getElementById('adminLink').value;
                 const emoji = document.getElementById('adminEmoji').value;
                 const btn = document.getElementById('adminSubmitBtn');
-                const outContainer = document.getElementById('adminResultContainer');
                 
                 btn.disabled = true; btn.textContent = 'Memproses...';
-                outContainer.classList.remove('hidden');
                 try {
                     const res = await fetch('/api/react', {
                         method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -708,14 +867,12 @@ function renderDashboardAdmin(user, allUsers, allCodes) {
                     });
                     const data = await res.json();
                     if(data.success) {
-                        document.getElementById('adminCoinDisplay').textContent = data.remainingCoins + ' Koin (Admin)';
+                        alert('Reaksi Berhasil Dikirim!');
                     } else {
                         alert(data.error);
-                        outContainer.classList.add('hidden');
                     }
                 } catch(err) {
                     alert('Gagal: ' + err.message);
-                    outContainer.classList.add('hidden');
                 } finally {
                     btn.disabled = false; btn.textContent = 'Kirim Reaksi (Bebas Biaya)';
                 }
