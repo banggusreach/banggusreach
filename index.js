@@ -83,7 +83,7 @@ async function registerXof(username, password, clientId){
 async function handshake(taunting = 9) {
   const res = await new Promise((resolve, reject) => {
   exec(`curl 'https://anzzmodsofficial.edgeone.dev/api/v1/handshake' -X POST -H 'Accept: */*' -H 'Accept-Language: id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7' -H 'Cache-Control: no-cache' -H 'Connection: keep-alive' -H 'Content-Length: 0' -H 'Origin: https://reach-wa-nexus.vercel.app' -H 'Pragma: no-cache' -H 'Referer: https://reach-wa-nexus.vercel.app/' -H 'Sec-Fetch-Dest: empty' -H 'Sec-Fetch-Mode: cors' -H 'Sec-Fetch-Site: cross-site' -H 'User-Agent: Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36' -H 'X-API-Key: anzz_live_18fc288f3fbc64643542c40197a5713f0aef51e354a6c254' -H 'sec-ch-ua: "Chromium";v="137", "Not/A)Brand";v="24"' -H 'sec-ch-ua-mobile: ?1' -H 'sec-ch-ua-platform: "Android"' --compressed`, (err, stdout) => {
-    if (err) reject(err);
+    if (err) return reject(err);
     try { resolve(JSON.parse(stdout)); } catch (e) { reject(e); }
   });
 });
@@ -106,8 +106,8 @@ async function send(url, reactions){
   if(!isValid) throw new Error('invalid url (Pastikan format link channel WhatsApp benar)');
   
   const res = await new Promise((resolve, reject) => { 
-   exec(`curl '${config.api}/api/v1/react' -X POST -H 'Accept: */*' \ -H 'Accept-Language: id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7' \ -H 'Cache-Control: no-cache' \ -H 'Connection: keep-alive' \ -H 'Content-Type: application/json' \ -H 'Origin: https://reach-wa-nexus.vercel.app' \ -H 'Pragma: no-cache' \ -H 'Referer: https://reach-wa-nexus.vercel.app/' \ -H 'Sec-Fetch-Dest: empty' \ -H 'Sec-Fetch-Mode: cors' \ -H 'Sec-Fetch-Site: cross-site' \ -H 'User-Agent: Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36' \ -H 'X-API-Key: ${config.apikey}' \ -H 'X-Handshake-Token: ${T}' \ -H 'sec-ch-ua: "Chromium";v="137", "Not/A)Brand";v="24"' -H 'sec-ch-ua-mobile: ?1' \ -H 'sec-ch-ua-platform: "Android"' \ --data-raw '${JSON.stringify({ url, reactions })}'\ --compressed`, (err, stdout) => {
-    if (err) reject(err);
+   exec(`curl '${config.api}/api/v1/react' -X POST -H 'Accept: */*' -H 'Accept-Language: id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7' -H 'Cache-Control: no-cache' -H 'Connection: keep-alive' -H 'Content-Type: application/json' -H 'Origin: https://reach-wa-nexus.vercel.app' -H 'Pragma: no-cache' -H 'Referer: https://reach-wa-nexus.vercel.app/' -H 'Sec-Fetch-Dest: empty' -H 'Sec-Fetch-Mode: cors' -H 'Sec-Fetch-Site: cross-site' -H 'User-Agent: Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36' -H 'X-API-Key: ${config.apikey}' -H 'X-Handshake-Token: ${T}' -H 'sec-ch-ua: "Chromium";v="137", "Not/A)Brand";v="24"' -H 'sec-ch-ua-mobile: ?1' -H 'sec-ch-ua-platform: "Android"' --data-raw '${JSON.stringify({ url, reactions })}' --compressed`, (err, stdout) => {
+    if (err) return reject(err);
     try { resolve(JSON.parse(stdout)); } catch (e) { reject(e); }
   });
 });
@@ -883,10 +883,14 @@ function renderDashboardAdmin(user, allUsers, allCodes) {
     `;
 }
 
-// Menjalankan Server Localhost
-app.listen(PORT, () => {
-    console.log('═══════════════════════════════════════════');
-    console.log(`🚀 Server berjalan di http://localhost:${PORT}`);
-    console.log(`👑 Admin: username 'adminbagus' | password 'baguss'`);
-    console.log('═══════════════════════════════════════════');
-});
+// Menjalankan Server (Support Localhost & Vercel Serverless Function)
+if (process.env.NODE_ENV !== 'production') {
+    app.listen(PORT, () => {
+        console.log('═══════════════════════════════════════════');
+        console.log(`🚀 Server berjalan di http://localhost:${PORT}`);
+        console.log(`👑 Admin: username 'adminbagus' | password 'baguss'`);
+        console.log('═══════════════════════════════════════════');
+    });
+}
+
+module.exports = app;
