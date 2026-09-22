@@ -120,14 +120,6 @@ async function loadUsersFromFirebase() {
   console.log(`✅ ${usersDB.length} akun berhasil dimuat dari Firebase.`);
 }
 
-// Inisialisasi Client Fetch Bawaan
-const go = Go.create({
-  baseURL: 'https://isifollowers.com',
-  browser: true,
-  cookieJar: true,
-  keepAlive: true
-});
-
 // Daftar Layanan
 const freeServices = {
   instagram: [
@@ -346,15 +338,13 @@ app.post('/api/order', requireAuth, async (req, res) => {
       whatsapp: ''
     });
 
-    let client = go;
-    if (user.role === 'admin') {
-      client = Go.create({
-        baseURL: 'https://isifollowers.com',
-        browser: true,
-        cookieJar: true,
-        keepAlive: false
-      });
-    }
+    // MEMBUAT INSTANCE CLIENT BARU DENGAN COOKIE JAR BARU (BERSIH DARI COOKIE SEBELUMNYA)
+    const client = Go.create({
+      baseURL: 'https://isifollowers.com',
+      browser: true,
+      cookieJar: true, // Setiap order menggunakan cookie baru, sehingga terhindar dari deteksi riwayat cookie sebelumnya
+      keepAlive: false
+    });
 
     await client.get('/');
     const response = await client.post('/ajax/order/orders.php', {
