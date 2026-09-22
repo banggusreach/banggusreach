@@ -1,0 +1,21 @@
+{
+  "name": "isifollowers-panel",
+  "version": "1.0.0",
+  "description": "Suntik Sosmed Free Banggus",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@xof/fetch": "^1.0.0",
+    "express": "^4.19.2",
+    "express-session": "^1.18.0"
+  },
+  "devDependencies": {
+    "@vercel/node": "^3.0.0"
+  },
+  "engines": {
+    "node": ">=18.x"
+  },
+  "private": true
+}
