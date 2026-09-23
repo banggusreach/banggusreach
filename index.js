@@ -123,7 +123,6 @@ async function loadServerStatusFromFirebase() {
     serverStatus.updatedBy = data.updatedBy || 'system';
     console.log(`[OK] Server status: ${serverStatus.online ? 'ONLINE' : 'OFFLINE'}`);
   } else {
-    // Default online & simpan ke Firebase
     await fbSet('serverStatus', serverStatus);
     console.log('[OK] Server status default: ONLINE');
   }
@@ -136,13 +135,24 @@ async function syncServerStatusToFirebase() {
 const syncRedeemToFirebase = (code) => fbSet(`redeems/${code}`, redeemDB[code]);
 const syncOrderToFirebase = (order) => fbSet(`orders/${order.orderId}`, order);
 
-// ---------------- CLIENT ----------------
-const go = Go.create({
+// ---------------- CLIENT (GLOBAL - hanya untuk cek status) ----------------
+const goStatusChecker = Go.create({
   baseURL: 'https://isifollowers.com',
   browser: true,
   cookieJar: true,
   keepAlive: true
 });
+
+// Fungsi untuk membuat client FRESH (cookie bersih) per order
+// Ini penting supaya server isifollowers.com menganggap sebagai session baru
+function createFreshClient() {
+  return Go.create({
+    baseURL: 'https://isifollowers.com',
+    browser: true,
+    cookieJar: true,
+    keepAlive: false
+  });
+}
 
 const freeServices = {
   instagram: [
@@ -200,7 +210,6 @@ function requireAdmin(req, res, next) {
   return next();
 }
 
-// Cek server online - admin selalu bypass
 function requireServerOnline(req, res, next) {
   if (req.user && req.user.role === 'admin') return next();
   if (!serverStatus.online) {
@@ -227,7 +236,7 @@ async function refreshOrderStatus(order) {
     let rawText = '';
     for (const ep of endpoints) {
       try {
-        const r = await go.get(ep, { headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+        const r = await goStatusChecker.get(ep, { headers: { 'X-Requested-With': 'XMLHttpRequest' } });
         const t = await r.text();
         if (t && t.length > 3) { rawText = t; break; }
       } catch (e) { }
@@ -301,7 +310,6 @@ app.get('/api/server/status', async (req, res) => {
 // ---------------- AUTH API ----------------
 app.post('/api/register', async (req, res) => {
   await loadUsersFromFirebase();
-  // Register ditutup saat server offline
   if (!serverStatus.online) {
     return res.status(503).json({
       success: false,
@@ -338,7 +346,6 @@ app.post('/api/login', async (req, res) => {
     return res.status(401).json({ success: false, message: 'Username atau Password salah!' });
   }
 
-  // Admin selalu bisa login, user biasa tidak bisa saat offline
   if (user.role !== 'admin' && !serverStatus.online) {
     return res.status(503).json({
       success: false,
@@ -357,7 +364,6 @@ app.post('/api/login', async (req, res) => {
 });
 
 app.get('/api/me', requireAuth, (req, res) => {
-  // Jika server offline & user bukan admin, paksa logout
   if (req.user.role !== 'admin' && !serverStatus.online) {
     return res.status(503).json({
       loggedIn: false,
@@ -385,7 +391,6 @@ app.get('/api/public/orders/:orderId', async (req, res) => {
     }
     if (!order) return res.status(404).json({ success: false, message: 'Orderan tidak ditemukan!' });
 
-    // Tracking publik TETAP jalan meski server offline (kecuali sedang maintenance)
     await refreshOrderStatus(order);
 
     return res.json({ success: true, order, serverOnline: serverStatus.online });
@@ -420,20 +425,41 @@ app.post('/api/order', requireAuth, requireServerOnline, async (req, res) => {
       jumlah: String(jumlah), whatsapp: ''
     });
 
-    let client = go;
-    if (user.role === 'admin') {
-      client = Go.create({
-        baseURL: 'https://isifollowers.com',
-        browser: true, cookieJar: true, keepAlive: false
-      });
-    }
+    // ================================================================
+    // PENTING: Selalu buat client FRESH dengan cookieJar baru
+    // Supaya server isifollowers.com menganggap ini session baru
+    // dan tidak memunculkan pesan "Anda sudah melakukan pemesanan gratis"
+    // ================================================================
+    const client = createFreshClient();
 
-    await client.get('/');
+    // Hapus cookie lama (jika ada) - cookieJar baru sudah bersih
+    try {
+      if (client.cookieJar && typeof client.cookieJar.clear === 'function') {
+        client.cookieJar.clear();
+      }
+    } catch (e) { /* ignore */ }
+
+    // Set header tambahan untuk menghindari deteksi session
+    const extraHeaders = {
+      'User-Agent': 'Mozilla/5.0 (Linux; Android 13; SM-S908B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
+      'Accept': '*/*',
+      'Accept-Language': 'id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7',
+      'Origin': 'https://isifollowers.com',
+      'Referer': 'https://isifollowers.com/',
+      'X-Requested-With': 'XMLHttpRequest'
+    };
+
+    // Kunjungi homepage dulu untuk dapat cookie fresh (opsional)
+    try {
+      await client.get('/', { headers: extraHeaders });
+    } catch (e) { /* lanjut saja walau gagal */ }
+
+    // Kirim order dengan cookie yang fresh
     const response = await client.post('/ajax/order/orders.php', {
       body: payload.toString(),
       headers: {
-        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-        'X-Requested-With': 'XMLHttpRequest'
+        ...extraHeaders,
+        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'
       }
     });
 
@@ -1758,10 +1784,9 @@ async function fetchServerStatus(){
     serverOnline=data.online;
     serverMessage=data.message||'';
     updateServerUI();
-    // Jika user non-admin & server baru offline -> logout paksa
     if(wasOnline && !serverOnline && currentUser && currentUser.role!=='admin'){
       toast('Server telah di-OFFLINE-kan oleh admin. Anda otomatis logout.','error');
-      setTimeout(()=>{localStorage.removeItem('authToken');location.reload();},2000);
+      setTimeout(()=>{clearToken();location.reload();},2000);
     }
   }catch(e){}
 }
@@ -1792,7 +1817,6 @@ function updateServerUI(){
     }
   }
 
-  // Login banner
   const loginBanner=document.getElementById('loginOfflineBanner');
   const loginMsg=document.getElementById('loginOfflineMsg');
   if(!serverOnline){
@@ -1802,7 +1826,6 @@ function updateServerUI(){
     loginBanner.classList.remove('show');
   }
 
-  // Tombol order — disable kalau user & offline
   const btnSubmit=document.getElementById('btnSubmit');
   if(btnSubmit){
     if(!serverOnline&&!isAdmin){
@@ -1821,15 +1844,38 @@ function updateServerUI(){
 }
 
 // ============ AUTH ============
+function saveTokenWithExpiry(token) {
+  localStorage.setItem('authToken', token);
+  const expiry = Date.now() + 30 * 24 * 60 * 60 * 1000;
+  localStorage.setItem('authTokenExpiry', expiry.toString());
+}
+function isTokenValid() {
+  const token = localStorage.getItem('authToken');
+  const expiry = localStorage.getItem('authTokenExpiry');
+  if (!token || !expiry) return false;
+  return Date.now() < parseInt(expiry, 10);
+}
+function clearToken() {
+  localStorage.removeItem('authToken');
+  localStorage.removeItem('authTokenExpiry');
+}
+
 async function checkAuth(){
+  if (!isTokenValid()) {
+    clearToken();
+    document.getElementById('authSection').style.display='block';
+    document.getElementById('appSection').style.display='none';
+    return;
+  }
+
   try{
     const res=await fetch('/api/me',{headers:authHeaders()});
     const data=await res.json();
     if(data.loggedIn){
-      if(data.token)localStorage.setItem('authToken',data.token);
+      if(data.token) saveTokenWithExpiry(data.token);
       showApp(data.user);
     }else{
-      localStorage.removeItem('authToken');
+      clearToken();
       document.getElementById('authSection').style.display='block';
       document.getElementById('appSection').style.display='none';
       if(data.serverOffline){
@@ -1894,7 +1940,7 @@ document.getElementById('authForm').addEventListener('submit',async e=>{
     });
     const data=await res.json();
     if(data.success){
-      if(data.token)localStorage.setItem('authToken',data.token);
+      if(data.token) saveTokenWithExpiry(data.token);
       toast(data.message||'Berhasil!','success');
       showApp(data.user);
     }else{
@@ -1905,7 +1951,7 @@ document.getElementById('authForm').addEventListener('submit',async e=>{
 });
 
 async function logout(){
-  localStorage.removeItem('authToken');
+  clearToken();
   location.reload();
 }
 
@@ -2293,7 +2339,6 @@ function renderAdminOrders(){
 (async()=>{
   await fetchServerStatus();
   await checkAuth();
-  // Poll server status tiap 10 detik
   serverStatusTimer=setInterval(fetchServerStatus,10000);
 })();
 </script>
