@@ -56,7 +56,6 @@ const usersDB = [];
 const redeemDB = {};
 const ordersDB = {};
 
-// Server status - default ONLINE, hanya admin yang bisa ubah
 const serverStatus = {
   online: true,
   message: 'Server sedang online',
@@ -113,7 +112,6 @@ async function loadOrdersFromFirebase() {
   console.log(`[OK] ${Object.keys(ordersDB).length} orderan dimuat.`);
 }
 
-// Load server status dari Firebase (persistent, tidak reset saat refresh)
 async function loadServerStatusFromFirebase() {
   const data = await fbGet('serverStatus');
   if (data && typeof data === 'object') {
@@ -135,7 +133,7 @@ async function syncServerStatusToFirebase() {
 const syncRedeemToFirebase = (code) => fbSet(`redeems/${code}`, redeemDB[code]);
 const syncOrderToFirebase = (order) => fbSet(`orders/${order.orderId}`, order);
 
-// ---------------- CLIENT (GLOBAL - hanya untuk cek status) ----------------
+// ---------------- CLIENT ----------------
 const goStatusChecker = Go.create({
   baseURL: 'https://isifollowers.com',
   browser: true,
@@ -143,8 +141,7 @@ const goStatusChecker = Go.create({
   keepAlive: true
 });
 
-// Fungsi untuk membuat client FRESH (cookie bersih) per order
-// Ini penting supaya server isifollowers.com menganggap sebagai session baru
+// Client FRESH per order (cookie bersih, hindari "sudah pernah order gratis")
 function createFreshClient() {
   return Go.create({
     baseURL: 'https://isifollowers.com',
@@ -180,15 +177,32 @@ function parseResponseStatus(responseText) {
   try { parsedJson = JSON.parse(responseText); } catch (e) {}
   const rawString = (parsedJson ? JSON.stringify(parsedJson) : responseText).toLowerCase();
 
+  // Cek GAGAL dulu (prioritas tertinggi, karena pesan gagal biasanya juga mengandung kata "gratis" dll)
+  if (
+    rawString.includes('sudah melakukan pemesanan') ||
+    rawString.includes('sudah pernah') ||
+    rawString.includes('silahkan pesan layanan berbayar') ||
+    rawString.includes('silakan pesan layanan berbayar') ||
+    rawString.includes('pesan layanan berbayar') ||
+    (parsedJson && (parsedJson.status === false || parsedJson.status === 'error' || parsedJson.status === 'failed')) ||
+    rawString.includes('gagal') ||
+    rawString.includes('failed') ||
+    rawString.includes('error')
+  ) {
+    return { status: "GAGAL", classType: "failed", icon: "", message: parsedJson?.message || responseText.trim() || "Gagal memproses orderan." };
+  }
+
   if (
     (parsedJson && (parsedJson.status === true || parsedJson.status === "success" || parsedJson.status === "sukses")) ||
     rawString.includes("berhasil") || rawString.includes("success") || rawString.includes("sukses")
   ) {
     return { status: "SUCCESS", classType: "success", icon: "", message: parsedJson?.message || responseText.trim() || "Orderan berhasil dikirim!" };
   }
+
   if (rawString.includes("pending") || rawString.includes("antrian") || rawString.includes("proses") || rawString.includes("wait")) {
     return { status: "PENDING", classType: "pending", icon: "", message: parsedJson?.message || responseText.trim() || "Orderan masuk antrean." };
   }
+
   return { status: "GAGAL", classType: "failed", icon: "", message: parsedJson?.message || responseText.trim() || "Gagal memproses orderan." };
 }
 
@@ -426,20 +440,16 @@ app.post('/api/order', requireAuth, requireServerOnline, async (req, res) => {
     });
 
     // ================================================================
-    // PENTING: Selalu buat client FRESH dengan cookieJar baru
-    // Supaya server isifollowers.com menganggap ini session baru
-    // dan tidak memunculkan pesan "Anda sudah melakukan pemesanan gratis"
+    // FRESH CLIENT — cookie baru supaya tidak kena "sudah pernah order"
     // ================================================================
     const client = createFreshClient();
 
-    // Hapus cookie lama (jika ada) - cookieJar baru sudah bersih
     try {
       if (client.cookieJar && typeof client.cookieJar.clear === 'function') {
         client.cookieJar.clear();
       }
     } catch (e) { /* ignore */ }
 
-    // Set header tambahan untuk menghindari deteksi session
     const extraHeaders = {
       'User-Agent': 'Mozilla/5.0 (Linux; Android 13; SM-S908B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
       'Accept': '*/*',
@@ -449,12 +459,10 @@ app.post('/api/order', requireAuth, requireServerOnline, async (req, res) => {
       'X-Requested-With': 'XMLHttpRequest'
     };
 
-    // Kunjungi homepage dulu untuk dapat cookie fresh (opsional)
     try {
       await client.get('/', { headers: extraHeaders });
-    } catch (e) { /* lanjut saja walau gagal */ }
+    } catch (e) { /* lanjut */ }
 
-    // Kirim order dengan cookie yang fresh
     const response = await client.post('/ajax/order/orders.php', {
       body: payload.toString(),
       headers: {
@@ -476,19 +484,30 @@ app.post('/api/order', requireAuth, requireServerOnline, async (req, res) => {
     }
 
     const orderId = 'ORD-' + Date.now() + '-' + crypto.randomBytes(3).toString('hex').toUpperCase();
-    const initialStatus = statusResult.status === 'GAGAL' ? 'gagal' : 'sedang menunggu antrian';
+
+    // ================================================================
+    // FITUR BARU: Jika gagal → langsung set status order = 'gagal'
+    // jadi di tab Status user langsung muncul GAGAL, tidak stuck
+    // di "menunggu antrian".
+    // ================================================================
+    const isFailed = statusResult.status === 'GAGAL';
+    const initialStatus = isFailed ? 'gagal' : 'sedang menunggu antrian';
 
     const order = {
       orderId, serverOrderId, username: user.username,
       service: service, serviceName: selected.name, serviceId: selected.id,
       target: url.trim(), jumlah: parseInt(jumlah, 10),
-      status: initialStatus, rawStatus: statusResult.status, message: statusResult.message,
+      status: initialStatus,
+      rawStatus: statusResult.status,
+      message: statusResult.message,
       createdAt: Date.now(), updatedAt: Date.now(), lastChecked: Date.now()
     };
     ordersDB[orderId] = order;
     await syncOrderToFirebase(order);
 
-    if (user.role !== 'admin') {
+    // Koin hanya dikurangi jika orderan TIDAK gagal
+    // (biar user nggak rugi kalau orderan langsung ditolak server)
+    if (user.role !== 'admin' && !isFailed) {
       user.coins -= 1;
       await syncUserToFirebase(user);
     }
@@ -1843,7 +1862,7 @@ function updateServerUI(){
   }
 }
 
-// ============ AUTH ============
+// ============ AUTH (AUTO LOGIN 30 HARI) ============
 function saveTokenWithExpiry(token) {
   localStorage.setItem('authToken', token);
   const expiry = Date.now() + 30 * 24 * 60 * 60 * 1000;
@@ -2035,6 +2054,7 @@ document.getElementById('orderForm').addEventListener('submit',async e=>{
         toast('Orderan terkirim!','success');
       }
       checkAuth();
+      // Refresh daftar order user supaya kalau gagal langsung kelihatan di tab Status
       loadMyOrders(true);
     }else{
       statusBox.className='result-box show failed';
@@ -2045,6 +2065,7 @@ document.getElementById('orderForm').addEventListener('submit',async e=>{
         fetchServerStatus();
       }
       checkAuth();
+      loadMyOrders(true);
     }
   }catch(err){
     statusBox.className='result-box show failed';
@@ -2115,6 +2136,7 @@ function renderOrderItem(o,showUser=false){
   html+='<div class="li-row"><span class="li-label">Link</span><span class="li-value target">'+o.target+'</span></div>';
   html+='<div class="li-row"><span class="li-label">Jumlah</span><span class="li-value">'+o.jumlah+'</span></div>';
   html+='<div class="li-row"><span class="li-label">Status</span><span class="li-value">'+statusPill(o.status,o.progress)+'</span></div>';
+  if(o.message)html+='<div class="li-row"><span class="li-label">Pesan</span><span class="li-value" style="font-size:11px">'+o.message+'</span></div>';
   html+='<div class="li-row"><span class="li-label">Tanggal</span><span class="li-value" style="font-size:11px;color:var(--text-3)">'+date+'</span></div>';
   html+='</div>';
   return html;
